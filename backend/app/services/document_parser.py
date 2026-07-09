@@ -9,7 +9,10 @@ from docx import Document
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
+from app.config import get_settings
 
+
+_STEP_SPLIT_RE = re.compile(r"(?=第[一二三四五六七八九十\d]+步[：:])")
 @dataclass(frozen=True)
 class ParsedBlock:
     text: str
@@ -36,14 +39,247 @@ class DocumentParserError(RuntimeError):
 def parse_document(path: Path) -> ParsedDocument:
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md"}:
-        return _parse_text(path)
-    if suffix == ".pdf":
-        return _parse_pdf(path)
-    if suffix == ".docx":
-        return _parse_docx(path)
-    if suffix == ".xlsx":
-        return _parse_xlsx(path)
-    raise DocumentParserError(f"Unsupported file type: {suffix or 'unknown'}")
+        document = _parse_text(path)
+    elif suffix == ".pdf":
+        document = _parse_pdf(path)
+    elif suffix == ".docx":
+        document = _parse_docx(path)
+    elif suffix == ".xlsx":
+        document = _parse_xlsx(path)
+    else:
+        raise DocumentParserError(f"Unsupported file type: {suffix or 'unknown'}")
+    return ParsedDocument(blocks=normalize_blocks(document.blocks))
+
+
+def normalize_blocks(blocks: list[ParsedBlock]) -> list[ParsedBlock]:
+    settings = get_settings()
+    normalized = [_normalize_block_artifacts(block) for block in blocks]
+    expanded: list[ParsedBlock] = []
+    for block in normalized:
+        expanded.extend(_expand_block(block))
+    split_mixed = _split_mixed_content_blocks(expanded)
+    merged = _merge_short_text_blocks(split_mixed, settings.chunk_child_min_chars, settings.chunk_child_target_chars)
+    return _promote_table_like_blocks(merged)
+
+
+def _normalize_block_artifacts(block: ParsedBlock) -> ParsedBlock:
+    if block.page_start is None:
+        return block
+    return ParsedBlock(
+        text=_normalize_pdf_artifacts(block.text),
+        source_locator=block.source_locator,
+        block_type=block.block_type,
+        page_start=block.page_start,
+        page_end=block.page_end,
+        heading_path=block.heading_path,
+    )
+
+
+def _normalize_pdf_artifacts(text: str) -> str:
+    cleaned = text
+    cleaned = re.sub(r"(\d)\.\s+(\d)", r"\1.\2", cleaned)
+    cleaned = re.sub(r"(\d)\s+%", r"\1%", cleaned)
+    cleaned = re.sub(r"([。！？；;])\s+", r"\1", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _split_mixed_content_blocks(blocks: list[ParsedBlock]) -> list[ParsedBlock]:
+    split_blocks: list[ParsedBlock] = []
+    for block in blocks:
+        if block.block_type != "text":
+            split_blocks.append(block)
+            continue
+        split_blocks.extend(_split_text_and_table_runs(block))
+    return split_blocks
+
+
+def _split_text_and_table_runs(block: ParsedBlock) -> list[ParsedBlock]:
+    lines = [line.strip() for line in block.text.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return [block]
+
+    runs: list[tuple[str, list[str]]] = []
+    current_type: str | None = None
+    current_lines: list[str] = []
+    for line in lines:
+        line_type = "table" if _looks_like_table_row(line) else "text"
+        if current_type != line_type:
+            if current_lines and current_type is not None:
+                runs.append((current_type, current_lines))
+            current_type = line_type
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines and current_type is not None:
+        runs.append((current_type, current_lines))
+
+    if len(runs) <= 1:
+        return [block]
+
+    split_blocks: list[ParsedBlock] = []
+    for run_type, run_lines in runs:
+        if not run_lines:
+            continue
+        block_type = "table" if run_type == "table" and len(run_lines) >= 2 else "text"
+        split_blocks.append(
+            ParsedBlock(
+                text="\n".join(run_lines),
+                source_locator=block.source_locator,
+                block_type=block_type,
+                page_start=block.page_start,
+                page_end=block.page_end,
+                heading_path=block.heading_path,
+            )
+        )
+    return split_blocks or [block]
+
+
+def _expand_block(block: ParsedBlock) -> list[ParsedBlock]:
+    if block.block_type in {"heading", "table"}:
+        return [block]
+    if block.block_type != "text":
+        return [block]
+
+    sections = _split_glued_step_sections(block.text)
+    if len(sections) <= 1:
+        return [block]
+
+    expanded: list[ParsedBlock] = []
+    current_heading = list(block.heading_path)
+    for section in sections:
+        heading = _step_heading(section)
+        if heading:
+            current_heading = _update_heading_path(current_heading, heading[0], heading[1])
+            expanded.append(
+                ParsedBlock(
+                    text=heading[1],
+                    source_locator=block.source_locator,
+                    block_type="heading",
+                    page_start=block.page_start,
+                    page_end=block.page_end,
+                    heading_path=tuple(current_heading),
+                )
+            )
+            body = heading[2].strip()
+            if body:
+                expanded.append(
+                    ParsedBlock(
+                        text=body,
+                        source_locator=block.source_locator,
+                        block_type="text",
+                        page_start=block.page_start,
+                        page_end=block.page_end,
+                        heading_path=tuple(current_heading),
+                    )
+                )
+            continue
+        expanded.append(
+            ParsedBlock(
+                text=section,
+                source_locator=block.source_locator,
+                block_type="text",
+                page_start=block.page_start,
+                page_end=block.page_end,
+                heading_path=tuple(current_heading),
+            )
+        )
+    return expanded or [block]
+
+
+def _split_glued_step_sections(text: str) -> list[str]:
+    parts = [part.strip() for part in _STEP_SPLIT_RE.split(text) if part.strip()]
+    return parts if len(parts) > 1 else [text]
+
+
+def _merge_short_text_blocks(blocks: list[ParsedBlock], min_chars: int, target_chars: int) -> list[ParsedBlock]:
+    if not blocks:
+        return blocks
+
+    merged: list[ParsedBlock] = []
+    buffer: ParsedBlock | None = None
+
+    def flush() -> None:
+        nonlocal buffer
+        if buffer is not None:
+            merged.append(buffer)
+            buffer = None
+
+    for block in blocks:
+        if block.block_type != "text":
+            flush()
+            merged.append(block)
+            continue
+
+        if buffer is None:
+            buffer = block
+            continue
+
+        combined_len = len(buffer.text) + len(block.text)
+        same_heading = buffer.heading_path == block.heading_path
+        same_locator = buffer.source_locator == block.source_locator
+        should_merge = same_heading and same_locator and (
+            len(buffer.text) < min_chars or combined_len <= target_chars
+        )
+        if should_merge:
+            buffer = ParsedBlock(
+                text=f"{buffer.text}\n\n{block.text}".strip(),
+                source_locator=buffer.source_locator,
+                block_type="text",
+                page_start=_min_page_value(buffer.page_start, block.page_start),
+                page_end=_max_page_value(buffer.page_end, block.page_end),
+                heading_path=buffer.heading_path,
+            )
+            continue
+
+        flush()
+        buffer = block
+
+    flush()
+    return merged
+
+
+def _promote_table_like_blocks(blocks: list[ParsedBlock]) -> list[ParsedBlock]:
+    promoted: list[ParsedBlock] = []
+    for block in blocks:
+        if block.block_type != "text":
+            promoted.append(block)
+            continue
+        lines = [line.strip() for line in block.text.splitlines() if line.strip()]
+        if len(lines) < 3:
+            promoted.append(block)
+            continue
+        table_like = sum(1 for line in lines if _looks_like_table_row(line))
+        if table_like / len(lines) >= 0.6:
+            promoted.append(
+                ParsedBlock(
+                    text=block.text,
+                    source_locator=block.source_locator,
+                    block_type="table",
+                    page_start=block.page_start,
+                    page_end=block.page_end,
+                    heading_path=block.heading_path,
+                )
+            )
+        else:
+            promoted.append(block)
+    return promoted
+
+
+def _min_page_value(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)
+
+
+def _max_page_value(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return max(left, right)
 
 
 def _parse_text(path: Path) -> ParsedDocument:
@@ -177,10 +413,10 @@ def _parse_xlsx(path: Path) -> ParsedDocument:
     blocks: list[ParsedBlock] = []
     for sheet in workbook.worksheets:
         rows = []
-        for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        for row in sheet.iter_rows(values_only=True):
             values = [str(value).strip() for value in row if value is not None and str(value).strip()]
             if values:
-                rows.append(f"第 {row_index} 行：" + " | ".join(values))
+                rows.append(" | ".join(values))
         if rows:
             blocks.append(
                 ParsedBlock(
@@ -292,13 +528,25 @@ def _should_join(previous: str, current: str) -> bool:
         return False
     if re.match(r"^[-•·●▪]|^\d+[.)、]", current):
         return False
+    if re.match(r"^[\d%+\-（(]", current) and not previous.endswith(("。", "！", "？", "；", "：", ":", ".", "!", ")", "）")):
+        return True
+    if re.search(r"[\u4e00-\u9fff]$", previous) and re.match(r"^[\u4e00-\u9fff（(]", current):
+        if len(previous) >= 12:
+            return True
     if len(previous) < 18:
         return False
     return True
 
 
 def _looks_like_table_row(line: str) -> bool:
-    return "|" in line or bool(re.search(r"\s{2,}", line))
+    if "|" in line:
+        return True
+    if re.search(r"\s{2,}", line):
+        return True
+    if re.match(r"^(指标|项目|区域|优点|缺点|情景|步骤|数据来源)", line):
+        return True
+    cells = re.split(r"\s{2,}", line.strip())
+    return len(cells) >= 3 and all(len(cell) <= 40 for cell in cells)
 
 
 def _markdown_heading(line: str) -> tuple[int, str] | None:
@@ -323,14 +571,25 @@ def _plain_heading(line: str) -> tuple[int, str] | None:
         return None
     patterns = [
         (r"^[一二三四五六七八九十]+[、.．]\s*(.+)$", 1),
-        (r"^第[一二三四五六七八九十\d]+[章节部分]\s*(.+)$", 1),
+        (r"^第[一二三四五六七八九十\d]+[章节部分步][：:]\s*(.+)$", 1),
+        (r"^第[一二三四五六七八九十\d]+[章节部分步]\s+(.+)$", 1),
         (r"^\d+[、.．]\s+(.+)$", 2),
         (r"^[（(]\d+[）)]\s*(.+)$", 4),
     ]
     for pattern, level in patterns:
-        if re.match(pattern, text):
+        match = re.match(pattern, text)
+        if match:
             return level, text
     return None
+
+
+def _step_heading(text: str) -> tuple[int, str, str] | None:
+    match = re.match(r"^(第[一二三四五六七八九十\d]+步)[：:]\s*(.*)$", text.strip())
+    if not match:
+        return None
+    title = match.group(1)
+    body = match.group(2).strip()
+    return 2, title, body
 
 
 def _update_heading_path(current: list[str], level: int, title: str) -> list[str]:

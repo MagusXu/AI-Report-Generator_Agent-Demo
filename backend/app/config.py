@@ -25,6 +25,19 @@ class Settings(BaseSettings):
     upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
     export_dir: str = Field(default="./exports", alias="EXPORT_DIR")
     cors_origins: str = Field(default="http://127.0.0.1:5173", alias="CORS_ORIGINS")
+    chunk_child_target_chars: int = Field(default=820, alias="CHUNK_CHILD_TARGET_CHARS")
+    chunk_child_min_chars: int = Field(default=300, alias="CHUNK_CHILD_MIN_CHARS")
+    chunk_child_max_chars: int = Field(default=1200, alias="CHUNK_CHILD_MAX_CHARS")
+    chunk_child_overlap_chars: int = Field(default=100, alias="CHUNK_CHILD_OVERLAP_CHARS")
+    chunk_parent_target_chars: int = Field(default=2200, alias="CHUNK_PARENT_TARGET_CHARS")
+    chunk_group_max_chars: int = Field(default=3520, alias="CHUNK_GROUP_MAX_CHARS")
+    table_rows_per_child: int = Field(default=18, alias="TABLE_ROWS_PER_CHILD")
+    table_rows_per_parent: int = Field(default=45, alias="TABLE_ROWS_PER_PARENT")
+    chunk_heading_prefix_enabled: bool = Field(default=True, alias="CHUNK_HEADING_PREFIX_ENABLED")
+    chunk_fallback_pages_per_group: int = Field(default=3, alias="CHUNK_FALLBACK_PAGES_PER_GROUP")
+    chunk_heading_chunks_enabled: bool = Field(default=True, alias="CHUNK_HEADING_CHUNKS_ENABLED")
+    chunk_quality_gate_mode: str = Field(default="warn", alias="CHUNK_QUALITY_GATE_MODE")
+    chunk_quality_min_score: int = Field(default=50, alias="CHUNK_QUALITY_MIN_SCORE")
 
     model_config = SettingsConfigDict(
         env_file=(".env", "config.env"),

@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.database import PROJECT_ID, get_connection, init_database, json_loads, row_to_dict, utc_now
-from app.services.chunker import TextChunk, chunk_document, summarize_chunk_quality
+from app.services.chunker import (
+    TextChunk,
+    chunk_document,
+    evaluate_chunk_quality_gate,
+    format_chunk_index_summary,
+    summarize_chunk_quality,
+)
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.embedding_client import EmbeddingClient, EmbeddingClientError
 from app.services.llm_client import LLMClient, LLMClientError, LLMResult
@@ -741,11 +747,15 @@ def remove_document_chunks_from_indexes(conn, document_id: str) -> None:
 
 def index_document_file(doc_id: str, document_name: str, document_type: str, upload_path: Path) -> tuple[list[TextChunk], list[dict], dict, dict]:
     parsed = parse_document(upload_path)
-    chunks = chunk_document(parsed, document_id=doc_id)
+    chunks = chunk_document(parsed, document_id=doc_id, document_type=document_type)
     if not chunks:
         raise DocumentParserError("No text chunks were generated from this document.")
 
     quality = summarize_chunk_quality(chunks)
+    gate_error = evaluate_chunk_quality_gate(quality)
+    if gate_error:
+        raise DocumentParserError(gate_error)
+
     embedding_client = EmbeddingClient()
     embeddings = embedding_client.embed_texts([chunk.text for chunk in chunks])
     vector_chunks = build_vector_chunks(doc_id, document_name, document_type, chunks)
@@ -926,7 +936,7 @@ async def upload_file(file: UploadFile = File(...), type: str = Form("")) -> dic
                 WHERE id = ?
                 """,
                 (
-                    f"已解析并入库，生成 {len(chunks)} 个 child chunks；chunk 质量评分 {quality['score']}/100。",
+                    format_chunk_index_summary(len(chunks), quality),
                     len(chunks),
                     utc_now(),
                     doc_id,
@@ -1035,7 +1045,7 @@ def reindex_document(document_id: str) -> dict:
                 WHERE id = ?
                 """,
                 (
-                    f"已使用新版 chunking 重新入库，生成 {len(chunks)} 个 child chunks；chunk 质量评分 {quality['score']}/100。",
+                    format_chunk_index_summary(len(chunks), quality),
                     len(chunks),
                     utc_now(),
                     document_id,
