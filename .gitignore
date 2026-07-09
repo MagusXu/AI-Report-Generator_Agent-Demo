@@ -1,0 +1,16 @@
+.env
+config.env
+backend/.env
+backend/config.env
+backend/.venv/
+backend/data/
+backend/uploads/
+backend/exports/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,62 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Runtime settings loaded from local env files when present."""
+
+    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
+    workspace_id: str = Field(default="", alias="WORKSPACE_ID")
+    llm_base_url: str = Field(
+        default="https://${WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        alias="LLM_BASE_URL",
+    )
+    llm_model: str = Field(default="qwen3.6-35b-a3b", alias="LLM_MODEL")
+    embedding_base_url: str = Field(
+        default="https://${WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        alias="EMBEDDING_BASE_URL",
+    )
+    embedding_model: str = Field(default="text-embedding-v4", alias="EMBEDDING_MODEL")
+    database_url: str = Field(default="sqlite:///./data/app.db", alias="DATABASE_URL")
+    chroma_path: str = Field(default="./data/chroma", alias="CHROMA_PATH")
+    upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
+    export_dir: str = Field(default="./exports", alias="EXPORT_DIR")
+    cors_origins: str = Field(default="http://127.0.0.1:5173", alias="CORS_ORIGINS")
+
+    model_config = SettingsConfigDict(
+        env_file=(".env", "config.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    @model_validator(mode="after")
+    def expand_workspace_urls(self) -> "Settings":
+        if self.workspace_id:
+            self.llm_base_url = self.llm_base_url.replace("${WORKSPACE_ID}", self.workspace_id)
+            self.embedding_base_url = self.embedding_base_url.replace("${WORKSPACE_ID}", self.workspace_id)
+        return self
+
+    @property
+    def upload_path(self) -> Path:
+        return Path(self.upload_dir)
+
+    @property
+    def export_path(self) -> Path:
+        return Path(self.export_dir)
+
+    @property
+    def chroma_data_path(self) -> Path:
+        return Path(self.chroma_path)
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
