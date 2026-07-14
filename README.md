@@ -156,9 +156,3 @@ CORS_ORIGINS=http://127.0.0.1:5173,http://127.0.0.1:5174
 
 **切勿提交**真实 API Key、`config.env`、上传原文、Chroma/SQLite 数据、导出物、`node_modules` 或虚拟环境。
 
-## v1 明确不做
-
-- Docker / 云端部署打包
-- 真实 Word/PDF 文件二进制生成
-- 登录鉴权、多用户与权限
-- 云端向量库
