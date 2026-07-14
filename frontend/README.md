@@ -1,29 +1,29 @@
-# Frontend
+# 前端
 
-React + TypeScript + Vite frontend for the local AI Report Generator Agent Demo.
+本地 AI 报告生成 Agent Demo 的 React + TypeScript + Vite 前端。
 
-中文总览见仓库根目录 [README.md](../README.md)；English: [README.en.md](../README.en.md)。
+项目总览见仓库根目录 [README.md](../README.md)。
 
-## Scope
+## 职责范围
 
-- Report project setup and workspace shell
-- Reference document upload / selection / indexing status
-- Section prompts, AI prompt assist, RAG generation controls
-- SSE streaming preview with execution-phase tips
-- Table settings: AI synthesize vs verbatim cite (title ≠ search description)
-- Content rendering: headings, bold, citations, tables with under-table captions
-- Versions, confirmation, full preview, simulated export checks
+- 报告项目配置与工作台界面
+- 参考资料上传 / 勾选 / 入库状态
+- 章节 Prompt、AI 辅助起草与 RAG 生成控制
+- SSE 流式预览与执行阶段提示
+- 表格设置：AI 汇总 / 引用原表（标题与检索描述分离）
+- 正文渲染：标题、加粗、引用、表格及表下灰色小字表题
+- 版本管理、确认、整份预览与模拟导出检查
 
-## Local Commands
+## 本地命令
 
-Node 22:
+Node 22：
 
 ```bash
 npm install
 npm run dev
 ```
 
-URL: `http://127.0.0.1:5173`
+本地地址：`http://127.0.0.1:5173`
 
 ```bash
 npm run build

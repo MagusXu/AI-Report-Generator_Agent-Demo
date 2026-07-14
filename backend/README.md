@@ -1,22 +1,22 @@
-# Backend
+# 后端
 
-FastAPI backend for the local AI Report Generator Agent Demo.
+本地 AI 报告生成 Agent Demo 的 FastAPI 后端。
 
-中文总览见仓库根目录 [README.md](../README.md)；English: [README.en.md](../README.en.md)。
+项目总览见仓库根目录 [README.md](../README.md)。
 
-## Scope
+## 职责范围
 
-- Health / runtime configuration
-- Report template and section state (SQLite)
-- Document upload, parse, chunk, embed, Chroma index/retrieve
-- Section generation (sync + SSE stream) with DashScope `qwen3.6-35b-a3b`
-- Table pipeline (`table_service.py`): AI synthesize + verbatim cite
-- Citation normalization and section version persistence
-- Simulated export records
+- 健康检查与运行时配置
+- 报告模板与章节状态（SQLite）
+- 参考资料上传、解析、分块、向量化与 Chroma 检索
+- 章节生成（同步 / SSE 流式），模型为通义 `qwen3.6-35b-a3b`
+- 表格流水线（`table_service.py`）：AI 汇总与引用原表
+- 引用规范化与章节版本落库
+- 模拟导出记录
 
-## Local Commands
+## 本地命令
 
-Python 3.12 via `uv`:
+Python 3.12，使用 `uv`：
 
 ```bash
 uv sync
@@ -29,9 +29,9 @@ uv run python scripts/check_dashscope.py
 uv run python scripts/check_rag_pipeline.py
 ```
 
-Connectivity and RAG checks call live DashScope APIs. The RAG check also writes a sample chunk to the local Chroma store.
+连通性与 RAG 检查会调用真实 DashScope 接口；RAG 检查还会向本地 Chroma 写入样例片段。
 
-## Local Data (gitignored)
+## 本地数据（已 gitignore）
 
 - `config.env`
 - `data/`
