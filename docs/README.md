@@ -1,8 +1,5 @@
-# Codebase Documentation
+# 代码库文档
 
-Only documentation that must live with the repository should be placed here.
+仅放必须随代码仓库保存的文档。
 
-Operational notes, setup records, validation records, and troubleshooting guides should be written to:
-
-`<外部文档目录>`
-
+运维说明、环境搭建记录、验证记录、排错文档等，请写到项目约定的内部文档目录，不要放进本公开仓库。

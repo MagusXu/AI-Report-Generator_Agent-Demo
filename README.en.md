@@ -61,7 +61,6 @@ Section generate (stream):
 │   └── README.md
 ├── docs/                     # repo-local docs only
 ├── .env.example
-├── AGENTS.md
 ├── README.md                 # Chinese (default)
 └── README.en.md              # English (this file)
 ```
