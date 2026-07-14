@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     chroma_path: str = Field(default="./data/chroma", alias="CHROMA_PATH")
     upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
     export_dir: str = Field(default="./exports", alias="EXPORT_DIR")
-    cors_origins: str = Field(default="http://127.0.0.1:5173", alias="CORS_ORIGINS")
+    cors_origins: str = Field(
+        default="http://127.0.0.1:5173,http://127.0.0.1:5174",
+        alias="CORS_ORIGINS",
+    )
     chunk_child_target_chars: int = Field(default=820, alias="CHUNK_CHILD_TARGET_CHARS")
     chunk_child_min_chars: int = Field(default=300, alias="CHUNK_CHILD_MIN_CHARS")
     chunk_child_max_chars: int = Field(default=1200, alias="CHUNK_CHILD_MAX_CHARS")

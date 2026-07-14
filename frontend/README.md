@@ -2,36 +2,28 @@
 
 React + TypeScript + Vite frontend for the local AI Report Generator Agent Demo.
 
-## Current Scope
+中文总览见仓库根目录 [README.zh-CN.md](../README.zh-CN.md)。
 
-This frontend provides the product workspace for the local RAG demo:
+## Scope
 
-- report project setup and summary
-- reference document upload and indexing status
-- section selector for the report template
-- per-section prompt editing
-- AI-assisted prompt drafting modal
-- RAG generation controls connected to the FastAPI backend
-- generated section versions, manual edits, and current-version confirmation
-- citation markers with source previews
-- full report preview and simulated export checks
+- Report project setup and workspace shell
+- Reference document upload / selection / indexing status
+- Section prompts, AI prompt assist, RAG generation controls
+- SSE streaming preview with execution-phase tips
+- Table settings: AI synthesize vs verbatim cite (title ≠ search description)
+- Content rendering: headings, bold, citations, tables with under-table captions
+- Versions, confirmation, full preview, simulated export checks
 
 ## Local Commands
 
-Use Node 22.
+Node 22:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Local URL:
-
-```text
-http://127.0.0.1:5173
-```
-
-Build check:
+URL: `http://127.0.0.1:5173`
 
 ```bash
 npm run build

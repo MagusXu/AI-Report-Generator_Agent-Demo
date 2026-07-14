@@ -26,19 +26,89 @@ from app.services.chunker import (
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.embedding_client import EmbeddingClient, EmbeddingClientError
 from app.services.llm_client import LLMClient, LLMClientError, LLMResult
+from app.services.table_service import (
+    SynthesizeTableConfig,
+    TableCandidatesRequest,
+    TableConfig,
+    TableValidationError,
+    VerbatimTableConfig,
+    build_table_query_suffix,
+    narrative_table_instructions,
+    process_tables_for_section,
+    scan_unverified_table_sections,
+    search_table_candidates,
+    validate_table_configs,
+)
 from app.services.vector_store import VectorStore
 
 
 settings = get_settings()
 init_database()
 
-DEFAULT_SYSTEM_PROMPT = """你是一名投行内部行业风险研究员。你必须只基于给定资料写作，不要编造具体数据。
+DEFAULT_SYSTEM_PROMPT = """你是一个面向银行内部使用的行业研究报告生成助手，目标是生成一份关于“消费电子行业风险分析”的中文书面报告，用于商业银行的授信审批、行业限额管理、内部评级和风险政策支持等场景。报告必须满足以下全局约束，并在所有章节中保持风格与逻辑的一致性。
 
-写作要求：
-1. 使用投行内部行业风险研究报告口吻。
-2. 结构为：核心判断、关键依据、风险提示、银行业务含义。
-3. 每个主要判断后尽量给出引用标注，格式必须是 [ref:chunk_id]。
-4. 如果资料不足，请明确写“现有资料不足以支持更细判断”，不要编造。"""
+### 一、整体定位与语气
+
+- 报告定位：面向商业银行的风险管理、授信审批、行业研究等专业读者，服务于信用风险识别、额度与结构设计和内部政策制定。
+- 语气要求：使用正式、专业、审慎的书面中文，避免口语化、情绪化或营销式表达；保持冷静、客观、中性，不使用夸张和煽动性措辞。
+- 立场与视角：全文站在银行风险管理与授信决策视角，而不是企业自我宣传或纯投资研究视角；任何结论和判断，都需要回到“对信用风险和授信安全性的影响”这一主线。
+
+### 二、结构与逻辑一致性
+
+- 逻辑主线：所有章节内容都应围绕以下链条进行隐含或显式的叙述：“宏观与政策环境 → 行业景气与结构 → 企业商业模式与运营财务特征 → 信用风险与银行资产质量/资本占用”。
+- 章节之间的衔接：即使不显式写出章节标题，段落内容也应在逻辑上相互支撑，避免前后结论冲突；后面的分析（财务、授信建议等）要以此前的行业和风险特征为基础，而不是孤立罗列。
+- 论证方式：优先采用“现象描述 → 原因分析 → 风险影响 → 银行关注点/应对方向”的结构展开论述，每个核心段落尽量保持这一模式。
+
+### 三、内容边界与信息使用规范
+
+- 行业边界：报告默认涵盖消费电子整机、零部件与模组、代工制造、品牌渠道与电商等相关业务，但不深入到与消费电子关联度较低的其他电子或硬件行业。
+- 数据与事实使用：以趋势、区间和定性描述为主，避免编造具体年份、精确数据或引用真实公司未公开信息；可以使用“近年来”“过去几个年度”“整体呈现增长/放缓趋势”等模糊时间与趋势表达。
+- 案例与公司名称：不出现具体公司全称或任何可能指向单一企业的敏感信息；如需案例说明，一律使用高度抽象的“某大型品牌商”“某头部代工企业”“某跨境电商卖家”等泛化表达。
+
+### 四、风险视角与评估框架
+
+- 风险类型覆盖：全文需要系统覆盖宏观环境风险、行业结构性风险、商业模式与盈利模式风险、财务与信用风险、运营与供应链风险、技术与产品生命周期风险、法律合规与 ESG 风险等维度。
+- 关注重点：在每一类风险的分析中，都要明确指出其对企业现金流、偿债能力、授信回收风险、不良率和资本占用的影响路径，而不仅仅停留在行业现象层面。
+- 风险程度与方向：采用“风险较高/中等/偏低”“波动较大/相对稳定”“集中度较高/分散”等方向性判断，不要求也不允许给出精确量化评级结果，但要避免模糊到无法指导授信实践。
+
+### 五、写作风格与表达规范
+
+- 语言规范：使用规范金融与风险管理术语，如“信用风险、违约概率、资产质量、资本占用、授信政策、额度管理、担保与抵质押、营运资本、现金流压力”等；避免网络用语和口语化表达。
+- 段落结构：段落内部保持信息密度适中，不使用长句堆砌导致理解困难；对于复杂内容可适度使用分句和分段，但保持整体连贯性与严谨性。
+- 价值判断：所有判断应基于行业通行认知或合理推理，避免出现绝对化表达（如“必然”“肯定”“毫无风险”），改用“可能”“倾向于”“在一定条件下”等审慎措辞。
+
+### 六、风格一致性与可读性
+
+- 全文一致性：在不同章节生成内容时，保持语气、用词、风险视角和逻辑主线一致，不出现明显风格断裂或立场变化。
+- 信息密度控制：保持适度高的信息密度和分析深度，但避免堆砌概念和重复表述；对同一风险点不在不同章节无意义重复，而是通过不同角度加深理解。
+- 可读性：内容面向具备金融与风控背景的读者，不需要对基础概念进行过度科普，但应确保段落结构清晰，方便授信与风险管理人员快速获取结论与重点。
+
+在生成具体章节内容时，始终遵守上述全局约束，并默认读者是银行内部的风险管理与授信专业人员，以消费电子行业的信用风险识别和授信决策支持为最核心目标。"""
+
+PROMPT_ASSIST_SYSTEM = """你是商业银行内部使用的「章节生成 Prompt」编写助手。
+你的任务：为《消费电子行业风险分析》报告的指定章节，编写一段可直接交给后续 RAG 写作模型使用的「章节 Prompt」；你不撰写报告正文。
+
+报告定位：
+- 面向银行风险管理、授信审批、行业研究等专业读者。
+- 服务于信用风险识别、额度与结构设计、内部政策制定。
+- 全文站在银行授信与风险管理视角，而非企业宣传或纯投资研究视角。
+- 结论与分析最终应落到「对信用风险、授信安全性和资产质量的影响」。
+
+你输出的章节 Prompt 必须同时满足：
+1. 只输出一段可直接粘贴使用的中文章节 Prompt，不要解释、不要前后缀、不要 Markdown 代码块。
+2. 不要输出报告正文，不要输出 [ref:chunk_id]，不要编造具体数值、年份或真实公司全称。
+3. 优先沿用并强化「当前默认 Prompt」中的写作目标；结合「用户补充要求」做修订，而不是推倒重来。
+4. 与整份报告大纲保持衔接：明确本章在「宏观/政策 → 行业景气与结构 → 商业模式与运营财务 → 信用风险与银行影响」链条中的位置，避免与前后章节重复堆砌同一风险点。
+5. 输出结构尽量固定为以下四段（可用【】标题）：
+   【写作目标】本章要回答什么问题、覆盖哪些分析维度、如何落到银行授信关注点。
+   【写作风格】正式审慎、结构清晰；可说明条块/分类对比/因果链条等展开方式。
+   【数据引用要求】以定性、趋势、区间表述为主；禁止要求编造精确数据；案例仅用泛化称谓（如「某大型品牌商」）。
+   【篇幅建议】给出段落/条块数量与大致字数区间，与本章功能匹配。
+6. 篇幅控制在约 350–650 字，表述克制、可执行；不要写成空泛模板口号。
+7. 除非用户明确要求，不要在 Prompt 里规定插入表格或占位符；表格由系统在生成阶段另行配置。"""
+
+PROMPT_ASSIST_MAX_TOKENS = 1400
+PROMPT_ASSIST_TEMPERATURE = 0.3
 
 app = FastAPI(
     title="AI Report Generator API",
@@ -86,6 +156,7 @@ class GenerateRequest(BaseModel):
     prompt: str | None = None
     system_prompt: str | None = None
     reference_ids: list[str] = Field(default_factory=list)
+    tables: list[TableConfig] = Field(default_factory=list)
     style: str = Field(default="strict")
     length: str = Field(default="medium")
     stream: bool = False
@@ -105,12 +176,7 @@ class SelectVersionRequest(BaseModel):
 
 
 class PromptAssistRequest(BaseModel):
-    objective: str = ""
-    key_questions: str = ""
-    geography: str = ""
-    risk_dimensions: str = ""
-    tone_length: str = ""
-    exclusions: str = ""
+    content: str = Field(min_length=1)
 
 
 class ExportRequest(BaseModel):
@@ -157,7 +223,7 @@ def fetch_sections(conn) -> list[dict]:
 def fetch_project(conn) -> dict:
     project = row_to_dict(conn.execute("SELECT * FROM projects WHERE id = ?", (PROJECT_ID,)).fetchone())
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail="未找到报告项目")
     return project
 
 
@@ -213,7 +279,7 @@ def fetch_ai_call_logs(conn) -> list[dict]:
         """
         SELECT * FROM ai_call_logs
         ORDER BY created_at DESC
-        LIMIT 20
+        LIMIT 50
         """
     ).fetchall()
     logs = []
@@ -225,27 +291,30 @@ def fetch_ai_call_logs(conn) -> list[dict]:
 
 
 def workspace_payload(conn) -> dict:
+    sections = fetch_sections(conn)
+    documents = fetch_documents(conn)
     return {
         "project": fetch_project(conn),
-        "documents": fetch_documents(conn),
-        "sections": fetch_sections(conn),
+        "documents": documents,
+        "sections": sections,
         "citations": fetch_citations(conn),
         "ai_call_logs": fetch_ai_call_logs(conn),
         "export_records": fetch_export_records(conn),
+        "export_issues": export_check(sections, documents),
     }
 
 
 def get_section_or_404(conn, section_id: str) -> dict:
     section = row_to_dict(conn.execute("SELECT * FROM sections WHERE id = ?", (section_id,)).fetchone())
     if section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
+        raise HTTPException(status_code=404, detail="未找到章节")
     return section
 
 
 def get_document_or_404(conn, document_id: str) -> dict:
     document = row_to_dict(conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone())
     if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="未找到参考文档")
     document["selected"] = bool(document["selected"])
     return document
 
@@ -368,18 +437,21 @@ def export_check(sections: list[dict], documents: list[dict]) -> list[str]:
     indexed_docs = [doc for doc in selected_docs if doc.get("parse_status") == "indexed" and doc.get("chunk_count", 0) > 0]
 
     if missing:
-        issues.append(f"以下一级章节尚未生成当前版本：{', '.join(missing)}")
+        issues.append(f"以下一级章节尚未生成：{'、'.join(missing)}")
     if unconfirmed:
-        issues.append(f"以下章节已有版本但尚未确认：{', '.join(unconfirmed[:6])}")
-    if len(selected_docs) < 2:
-        issues.append("当前勾选参考文档少于 2 份，建议补充资料后再导出。")
+        issues.append(f"以下章节尚未确认：{'、'.join(unconfirmed[:6])}")
     if not indexed_docs:
-        issues.append("当前没有已入库的真实参考文档，建议上传并完成索引后再导出。")
+        issues.append("当前没有已入库的参考文档")
+    unverified_sections = scan_unverified_table_sections(sections)
+    if unverified_sections:
+        issues.append(f"以下章节含待核实表格数据：{'、'.join(unverified_sections[:6])}")
     return issues
 
 
-def build_rag_query(project: dict, section: dict, prompt: str) -> str:
-    return f"{project['industry']} {project['year']} {section['title']} {prompt}"
+def build_rag_query(project: dict, section: dict, prompt: str, tables: list | None = None) -> str:
+    base = f"{project['industry']} {project['year']} {section['title']} {prompt}"
+    suffix = build_table_query_suffix(tables or [])
+    return f"{base} {suffix}".strip()
 
 
 def build_rag_messages(
@@ -389,6 +461,7 @@ def build_rag_messages(
     chunks: list[dict],
     system_prompt: str,
     use_parent_context: bool = True,
+    tables: list | None = None,
 ) -> list[dict[str, str]]:
     context_lines = []
     seen_parent_ids: set[str] = set()
@@ -417,22 +490,37 @@ def build_rag_messages(
 
 章节 prompt：
 {prompt}
+{_table_prompt_block(tables)}
 
 可引用资料：
 {chr(10).join(context_lines)}
+
+写作与引用要求：
+1. 必须只基于上述资料写作，不要编造具体数据。
+2. 每个主要判断后尽量给出引用标注，格式必须是 [ref:chunk_id]。
+3. 如果资料不足，请明确写“现有资料不足以支持更细判断”，不要编造。
 """
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
 
 
+def _table_prompt_block(tables: list | None) -> str:
+    if not tables:
+        return ""
+    return f"\n\n{narrative_table_instructions(tables)}\n"
+
+
 def ensure_citations(content: str, chunk_ids: list[str]) -> str:
+    # 兼容模型偶发输出的全角括号引用，统一成前端可渲染的 [ref:...]
+    content = re.sub(r"【ref:([^】]+)】", r"[ref:\1]", content)
+    # 引用只保留正文内联标注，不在文末单独罗列资料来源
+    content = re.sub(r"(?:\n|^)[ \t]*资料来源：[^\n]*\s*$", "", content)
+
     known_ids = set(chunk_ids)
     used_ids = set(re.findall(r"\[ref:([^\]]+)\]", content))
     invalid_ids = used_ids - known_ids
     for invalid_id in invalid_ids:
         content = content.replace(f"[ref:{invalid_id}]", "")
 
-    if not re.search(r"\[ref:[^\]]+\]", content) and chunk_ids:
-        content = f"{content.rstrip()}\n\n资料来源：{', '.join(f'[ref:{chunk_id}]' for chunk_id in chunk_ids[:3])}"
     return content.strip()
 
 
@@ -446,6 +534,7 @@ def generation_settings_snapshot(payload: GenerateRequest) -> dict:
         "use_parent_context": payload.use_parent_context,
         "temperature": payload.temperature,
         "max_tokens": payload.max_tokens,
+        "tables": [table.model_dump() for table in payload.tables],
     }
 
 
@@ -486,11 +575,17 @@ def format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def prepare_section_generation(conn, section_id: str, payload: GenerateRequest) -> dict:
+def prepare_section_base(conn, section_id: str, payload: GenerateRequest) -> dict:
     section = get_section_or_404(conn, section_id)
     if payload.prompt:
         conn.execute("UPDATE sections SET prompt = ? WHERE id = ?", (payload.prompt, section_id))
         section["prompt"] = payload.prompt
+
+    if payload.tables:
+        try:
+            validate_table_configs(payload.tables)
+        except TableValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     project = fetch_project(conn)
     docs = get_documents_by_ids(conn, payload.reference_ids)
@@ -498,41 +593,91 @@ def prepare_section_generation(conn, section_id: str, payload: GenerateRequest) 
     if not indexed_docs:
         raise HTTPException(status_code=400, detail="请先上传并勾选至少一份已完成入库的真实参考文档。")
 
-    query = build_rag_query(project, section, section["prompt"])
+    query = build_rag_query(project, section, section["prompt"], payload.tables)
+    return {
+        "section": section,
+        "project": project,
+        "indexed_docs": indexed_docs,
+        "query": query,
+        "tables": payload.tables,
+    }
+
+
+def retrieve_section_chunks(base: dict, payload: GenerateRequest) -> dict:
     query_embedding_client = EmbeddingClient()
     try:
-        query_embedding = query_embedding_client.embed_query(query)
+        query_embedding = query_embedding_client.embed_query(base["query"])
     except EmbeddingClientError as exc:
         raise HTTPException(status_code=502, detail=f"Embedding 调用失败：{exc}") from exc
 
     retrieved_chunks = VectorStore().query(
         query_embedding=query_embedding,
-        document_ids=[doc["id"] for doc in indexed_docs],
+        document_ids=[doc["id"] for doc in base["indexed_docs"]],
         top_k=payload.retrieval_top_k,
     )
     retrieved_chunks = apply_per_document_limit(retrieved_chunks, payload.per_document_limit)
     if not retrieved_chunks:
         raise HTTPException(status_code=400, detail="未检索到可用于生成的资料片段。")
 
-    system_prompt = (payload.system_prompt or DEFAULT_SYSTEM_PROMPT).strip() or DEFAULT_SYSTEM_PROMPT
-    messages = build_rag_messages(
-        project,
-        section,
-        section["prompt"],
-        retrieved_chunks,
-        system_prompt=system_prompt,
-        use_parent_context=payload.use_parent_context,
-    )
     return {
-        "section": section,
-        "project": project,
-        "indexed_docs": indexed_docs,
-        "query": query,
         "query_embedding_client": query_embedding_client,
         "retrieved_chunks": retrieved_chunks,
+    }
+
+
+def assemble_section_context(base: dict, retrieval: dict, payload: GenerateRequest) -> dict:
+    system_prompt = (payload.system_prompt or DEFAULT_SYSTEM_PROMPT).strip() or DEFAULT_SYSTEM_PROMPT
+    messages = build_rag_messages(
+        base["project"],
+        base["section"],
+        base["section"]["prompt"],
+        retrieval["retrieved_chunks"],
+        system_prompt=system_prompt,
+        use_parent_context=payload.use_parent_context,
+        tables=payload.tables,
+    )
+    return {
+        **base,
+        **retrieval,
         "system_prompt": system_prompt,
         "messages": messages,
     }
+
+
+def prepare_section_generation(conn, section_id: str, payload: GenerateRequest) -> dict:
+    base = prepare_section_base(conn, section_id, payload)
+    retrieval = retrieve_section_chunks(base, payload)
+    return assemble_section_context(base, retrieval, payload)
+
+
+def finalize_generated_content(
+    conn,
+    *,
+    narrative_content: str,
+    context: dict,
+    payload: GenerateRequest,
+) -> tuple[str, list[str], dict]:
+    retrieved_chunks = context["retrieved_chunks"]
+    reference_ids = [chunk["id"] for chunk in retrieved_chunks]
+    table_result = process_tables_for_section(
+        conn,
+        project=context["project"],
+        section=context["section"],
+        narrative_content=narrative_content,
+        tables=payload.tables,
+        retrieved_chunks=retrieved_chunks,
+        use_parent_context=payload.use_parent_context,
+    )
+    merged_reference_ids = list(reference_ids)
+    for chunk_id in table_result.extra_reference_ids:
+        if chunk_id not in merged_reference_ids:
+            merged_reference_ids.append(chunk_id)
+    content = ensure_citations(table_result.content, merged_reference_ids)
+    table_metadata = {
+        "table_warnings": table_result.table_warnings,
+        "tables": table_result.table_metadata,
+    }
+    return content, merged_reference_ids, table_metadata
 
 
 def persist_section_generation(
@@ -551,12 +696,17 @@ def persist_section_generation(
     llm_result: LLMResult,
     content: str,
     reference_ids: list[str],
+    table_metadata: dict | None = None,
 ) -> dict:
+    table_count = len(payload.tables)
+    summary = f"基于 {len(indexed_docs)} 份资料、{len(retrieved_chunks)} 个片段生成真实 RAG 版本。"
+    if table_count:
+        summary = f"{summary} 含 {table_count} 张表格。"
     create_version(
         conn,
         section_id=section_id,
         source="RAG + Qwen",
-        summary=f"基于 {len(indexed_docs)} 份资料、{len(retrieved_chunks)} 个片段生成真实 RAG 版本。",
+        summary=summary,
         content=content,
         reference_ids=reference_ids,
     )
@@ -593,15 +743,51 @@ def persist_section_generation(
             "reference_ids": reference_ids,
             "citation_map": citation_map_from_chunks(retrieved_chunks),
             "citation_rendering_rule": "正文中的 [ref:chunk_id] 会在前端通过 workspace.citations[chunk_id] 映射到 document_chunks 与 documents 表，从而显示文档名、类型、source_locator 和片段文本。",
+            "table_metadata": table_metadata or {},
         },
     )
+    for table_item in (table_metadata or {}).get("tables", []):
+        if table_item.get("mode") != "synthesize":
+            continue
+        record_ai_call(
+            conn,
+            operation=f"表格汇总 LLM · 表{table_item.get('index')}",
+            model=settings.llm_model,
+            usage=table_item.get("llm_usage") or {},
+            metadata={
+                "section_id": section_id,
+                "section_title": section["title"],
+                "table_index": table_item.get("index"),
+                "table_title": table_item.get("title"),
+                "warnings": table_item.get("warnings") or [],
+                "llm_api_request": table_item.get("llm_api_request"),
+                "llm_api_response": table_item.get("llm_api_response"),
+                "prompt_structure": table_item.get("prompt_structure"),
+                "output_content": table_item.get("output_content"),
+            },
+        )
     return workspace_payload(conn)
 
 
 def stream_section_generation(section_id: str, payload: GenerateRequest) -> Iterator[str]:
     with get_connection() as conn:
         try:
-            context = prepare_section_generation(conn, section_id, payload)
+            yield format_sse(
+                "status",
+                {"phase": "prepare", "message": "校验章节与参考资料…"},
+            )
+            base = prepare_section_base(conn, section_id, payload)
+
+            yield format_sse(
+                "status",
+                {
+                    "phase": "retrieve",
+                    "message": f"正在检索 {len(base['indexed_docs'])} 份已选资料…",
+                },
+            )
+            retrieval = retrieve_section_chunks(base, payload)
+            context = assemble_section_context(base, retrieval, payload)
+
             section = context["section"]
             project = context["project"]
             indexed_docs = context["indexed_docs"]
@@ -615,7 +801,7 @@ def stream_section_generation(section_id: str, payload: GenerateRequest) -> Iter
                 "status",
                 {
                     "phase": "generating",
-                    "message": f"已检索 {len(retrieved_chunks)} 个资料片段，开始生成…",
+                    "message": f"已命中 {len(retrieved_chunks)} 个资料片段，开始生成正文…",
                 },
             )
 
@@ -638,8 +824,39 @@ def stream_section_generation(section_id: str, payload: GenerateRequest) -> Iter
                 yield format_sse("error", {"detail": "LLM 未返回任何内容"})
                 return
 
-            reference_ids = [chunk["id"] for chunk in retrieved_chunks]
-            content = ensure_citations(raw_content, reference_ids)
+            if payload.tables:
+                yield format_sse(
+                    "status",
+                    {"phase": "tables", "message": f"正文已完成，正在处理 {len(payload.tables)} 张表格…"},
+                )
+
+            try:
+                content, reference_ids, table_metadata = finalize_generated_content(
+                    conn,
+                    narrative_content=raw_content,
+                    context=context,
+                    payload=payload,
+                )
+            except (TableValidationError, RuntimeError) as exc:
+                yield format_sse("error", {"detail": str(exc)})
+                return
+
+            if payload.tables:
+                yield format_sse(
+                    "status",
+                    {
+                        "phase": "tables_done",
+                        "message": "表格已插入",
+                        "content": content,
+                        "table_warnings": table_metadata.get("table_warnings", []),
+                    },
+                )
+
+            yield format_sse(
+                "status",
+                {"phase": "persist", "message": "正在保存章节版本…"},
+            )
+
             llm_result = LLMResult(
                 content=raw_content,
                 usage=llm_client.last_usage,
@@ -666,6 +883,7 @@ def stream_section_generation(section_id: str, payload: GenerateRequest) -> Iter
                 llm_result=llm_result,
                 content=content,
                 reference_ids=reference_ids,
+                table_metadata=table_metadata,
             )
             yield format_sse("done", {"workspace": workspace})
         except HTTPException as exc:
@@ -971,7 +1189,7 @@ def update_document_selection(document_id: str, payload: DocumentSelection) -> d
             (1 if payload.selected else 0, document_id),
         )
         if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Document not found")
+            raise HTTPException(status_code=404, detail="未找到参考文档")
         return workspace_payload(conn)
 
 
@@ -1137,8 +1355,18 @@ def generate_section(section_id: str, payload: GenerateRequest):
         except LLMClientError as exc:
             raise HTTPException(status_code=504, detail=f"LLM 调用失败：{exc}") from exc
 
-        reference_ids = [chunk["id"] for chunk in retrieved_chunks]
-        content = ensure_citations(llm_result.content, reference_ids)
+        try:
+            content, reference_ids, table_metadata = finalize_generated_content(
+                conn,
+                narrative_content=llm_result.content,
+                context=context,
+                payload=payload,
+            )
+        except TableValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
         return persist_section_generation(
             conn,
             section_id=section_id,
@@ -1154,7 +1382,29 @@ def generate_section(section_id: str, payload: GenerateRequest):
             llm_result=llm_result,
             content=content,
             reference_ids=reference_ids,
+            table_metadata=table_metadata,
         )
+
+
+@app.post("/api/sections/{section_id}/table-candidates")
+def table_candidates(section_id: str, payload: TableCandidatesRequest) -> dict:
+    with get_connection() as conn:
+        get_section_or_404(conn, section_id)
+        docs = get_documents_by_ids(conn, payload.reference_ids)
+        indexed_docs = [doc for doc in docs if doc.get("parse_status") == "indexed" and doc.get("chunk_count", 0) > 0]
+        if not indexed_docs:
+            raise HTTPException(status_code=400, detail="请先上传并勾选至少一份已完成入库的真实参考文档。")
+
+    try:
+        candidates = search_table_candidates(
+            description=payload.description,
+            document_ids=[doc["id"] for doc in indexed_docs],
+            top_k=payload.top_k,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"candidates": candidates}
 
 
 @app.post("/api/sections/{section_id}/clear")
@@ -1199,7 +1449,7 @@ def select_version(section_id: str, payload: SelectVersionRequest) -> dict:
             (payload.version_id, section_id),
         ).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Version not found")
+            raise HTTPException(status_code=404, detail="未找到版本")
         conn.execute(
             "UPDATE sections SET current_version_id = ?, confirmed = 1 WHERE id = ?",
             (payload.version_id, section_id),
@@ -1212,33 +1462,116 @@ def confirm_section(section_id: str) -> dict:
     with get_connection() as conn:
         section = get_section_or_404(conn, section_id)
         if not section["current_version_id"]:
-            raise HTTPException(status_code=400, detail="Section has no current version")
+            raise HTTPException(status_code=400, detail="当前章节尚无版本")
         conn.execute("UPDATE sections SET confirmed = 1 WHERE id = ?", (section_id,))
         return workspace_payload(conn)
 
 
+def format_report_outline(sections: list[dict]) -> str:
+    lines: list[str] = []
+    for section in sections:
+        if section["level"] == 1:
+            lines.append(f"- {section['number']}、{section['title']}")
+        else:
+            lines.append(f"  - {section['number']}. {section['title']}")
+    return "\n".join(lines)
+
+
+def section_parent_title(sections: list[dict], section: dict) -> str:
+    parent_id = section.get("parent_id")
+    if not parent_id:
+        return "无"
+    parent = next((item for item in sections if item["id"] == parent_id), None)
+    if parent is None:
+        return "无"
+    return f"{parent['number']}、{parent['title']}"
+
+
+def format_selected_reference_documents(documents: list[dict]) -> str:
+    selected = [document for document in documents if document.get("selected")]
+    if not selected:
+        return "当前未勾选参考文档"
+    return "\n".join(f"- {document['name']}（{document['type']}）" for document in selected)
+
+
+def build_prompt_assist_messages(
+    project: dict,
+    section: dict,
+    sections: list[dict],
+    documents: list[dict],
+    user_content: str,
+) -> list[dict[str, str]]:
+    section_label = (
+        f"{section['number']}、{section['title']}"
+        if section["level"] == 1
+        else f"{section['number']}. {section['title']}"
+    )
+    user = f"""请为以下报告章节编写一段「章节生成 Prompt」（给后续 RAG 写作模型使用，不是写正文）。
+
+【报告】{project['name']} | 行业 {project['industry']} | {project['year']} | {project['language']}
+【章节】{section_label}（level {section['level']}，所属：{section_parent_title(sections, section)}）
+【报告大纲】
+{format_report_outline(sections)}
+【已勾选参考文档】
+{format_selected_reference_documents(documents)}
+【当前默认 Prompt】
+{section['prompt']}
+【用户补充要求】
+{user_content}
+
+请直接输出优化后的章节 Prompt，不要解释。"""
+    return [{"role": "system", "content": PROMPT_ASSIST_SYSTEM}, {"role": "user", "content": user}]
+
+
 @app.post("/api/sections/{section_id}/enhance-prompt")
-def enhance_prompt(section_id: str, payload: PromptAssistRequest) -> dict[str, str]:
+def enhance_prompt(section_id: str, payload: PromptAssistRequest) -> dict[str, object]:
+    user_content = payload.content.strip()
+    if not user_content:
+        raise HTTPException(status_code=400, detail="请填写内容要求")
+
     with get_connection() as conn:
         section = get_section_or_404(conn, section_id)
         project = fetch_project(conn)
+        sections = fetch_sections(conn)
+        documents = fetch_documents(conn)
 
-    prompt = f"""你是一名投行内部行业研究员。请为《{project['name']}》撰写章节「{section['title']}」。
+    messages = build_prompt_assist_messages(project, section, sections, documents, user_content)
 
-报告基础信息：
-- 行业：{project['industry']}
-- 年份：{project['year']}
-- 语言：{project['language']}
+    try:
+        llm_result = LLMClient().generate(
+            messages=messages,
+            max_tokens=PROMPT_ASSIST_MAX_TOKENS,
+            temperature=PROMPT_ASSIST_TEMPERATURE,
+            stream=False,
+        )
+    except LLMClientError as exc:
+        raise HTTPException(status_code=502, detail=f"LLM 调用失败：{exc}") from exc
 
-写作目标：{payload.objective or '形成可用于行业风险判断和客户准入讨论的分析段落。'}
-重点问题：{payload.key_questions or '市场事实、核心判断、风险含义、银行业务启示。'}
-地域范围：{payload.geography or '全球、中国、香港、东南亚，按章节需要取舍。'}
-风险维度：{payload.risk_dimensions or '政策合规、供需、电力、资本开支、客户集中度、竞争格局。'}
-语气和篇幅：{payload.tone_length or '投行内部研究报告口吻，克制、结构化，约 600-900 字。'}
-排除内容：{payload.exclusions or '避免营销化表达，不编造具体数据，不输出无来源的绝对判断。'}
+    prompt = llm_result.content.strip()
+    if not prompt:
+        raise HTTPException(status_code=502, detail="LLM 未返回任何内容")
 
-请按「结论先行 - 关键依据 - 风险提示 - 业务含义」组织内容，并在引用资料观点时保留来源标注。"""
-    return {"prompt": prompt}
+    with get_connection() as conn:
+        record_ai_call(
+            conn,
+            operation="Prompt 辅助生成 LLM",
+            model=settings.llm_model,
+            usage=llm_result.usage,
+            metadata={
+                "section_id": section_id,
+                "section_title": section["title"],
+                "project": project,
+                "user_content": user_content,
+                "selected_documents": format_selected_reference_documents(documents),
+                "llm_api_request": llm_result.request_payload,
+                "llm_api_response": llm_result.response_payload,
+                "prompt_structure": messages,
+                "output_content": prompt,
+            },
+        )
+        workspace = workspace_payload(conn)
+
+    return {"prompt": prompt, "source": "llm", "workspace": workspace}
 
 
 @app.get("/api/report-preview")
@@ -1263,7 +1596,7 @@ def create_export(payload: ExportRequest) -> dict:
         documents = fetch_documents(conn)
         issues = export_check(sections, documents)
         export_id = f"export_{uuid4().hex[:10]}"
-        status = "已生成模拟导出记录" if not issues else "已生成但需复核"
+        status = "导出记录已创建" if not issues else "导出前需复核"
         conn.execute(
             """
             INSERT INTO export_records (id, format, status, issues, created_at)
@@ -1277,5 +1610,6 @@ def create_export(payload: ExportRequest) -> dict:
 @app.get("/api/report-template")
 def report_template() -> dict[str, object]:
     with get_connection() as conn:
+        project = fetch_project(conn)
         sections = fetch_sections(conn)
-    return {"name": "数据中心行业风险研究报告", "sections": sections}
+    return {"name": project["name"], "sections": sections}
