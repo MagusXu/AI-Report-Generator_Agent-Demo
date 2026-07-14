@@ -2,7 +2,7 @@
 
 React + TypeScript + Vite frontend for the local AI Report Generator Agent Demo.
 
-中文总览见仓库根目录 [README.zh-CN.md](../README.zh-CN.md)。
+中文总览见仓库根目录 [README.md](../README.md)；English: [README.en.md](../README.en.md)。
 
 ## Scope
 
