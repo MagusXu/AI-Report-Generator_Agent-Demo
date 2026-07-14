@@ -2,8 +2,6 @@
 
 本地全栈 Demo：面向投行内部「行业风险研究」类报告的 **RAG 辅助写作**。
 
-**English version: [README.en.md](./README.en.md)**
-
 用户可管理报告项目与参考资料，按模板分章节检索生成、编辑与版本确认，插入表格，全文预览，并模拟导出交付物。
 
 ## 当前阶段
@@ -61,8 +59,7 @@
 │   └── README.md
 ├── docs/                     # 仅放必须随仓库的文档
 ├── .env.example
-├── README.md                 # 中文（默认）
-└── README.en.md              # English
+└── README.md
 ```
 
 ## 流式生成逻辑
