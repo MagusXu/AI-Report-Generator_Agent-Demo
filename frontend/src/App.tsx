@@ -1124,7 +1124,7 @@ function App() {
           <nav className="mode-tabs" aria-label="工作台模式">
             <button type="button" className={workspaceMode === "editor" ? "active" : ""} onClick={() => setWorkspaceMode("editor")}>章节编辑</button>
             <button type="button" className={workspaceMode === "preview" ? "active" : ""} onClick={() => setWorkspaceMode("preview")}>整份预览</button>
-            <button type="button" className={workspaceMode === "ai-map" ? "active" : ""} onClick={() => setWorkspaceMode("ai-map")}>AI 调用日志</button>
+            <button type="button" className={workspaceMode === "ai-map" ? "active" : ""} onClick={() => setWorkspaceMode("ai-map")}>模型调用日志</button>
           </nav>
         )}
 
@@ -1405,7 +1405,7 @@ function App() {
       <article className="document ai-map-paper">
         <div className="doc-header">
           <p className="doc-kicker">模型调用与检索证据</p>
-          <h1>AI 调用日志</h1>
+          <h1>模型调用日志</h1>
           <span className="version-state">{workspace.ai_call_logs.length} 次调用</span>
         </div>
         <div className="ai-map-grid">
