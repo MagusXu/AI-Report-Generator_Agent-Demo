@@ -21,6 +21,12 @@ class LLMResult:
     response_payload: dict
 
 
+@dataclass(frozen=True)
+class StreamDelta:
+    kind: str  # "reasoning" | "content"
+    text: str
+
+
 class LLMClient:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -42,15 +48,12 @@ class LLMClient:
             raise LLMClientError("DASHSCOPE_API_KEY is not configured")
 
         url = f"{self.settings.llm_base_url.rstrip('/')}/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if stream:
-            payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
+        payload = self._build_payload(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=stream,
+        )
         headers = {
             "Authorization": f"Bearer {self.settings.dashscope_api_key}",
             "Content-Type": "application/json",
@@ -85,19 +88,17 @@ class LLMClient:
         messages: list[dict[str, str]],
         max_tokens: int = 1400,
         temperature: float = 0.2,
-    ) -> Iterator[str]:
+    ) -> Iterator[StreamDelta]:
         if not self.settings.dashscope_api_key:
             raise LLMClientError("DASHSCOPE_API_KEY is not configured")
 
         url = f"{self.settings.llm_base_url.rstrip('/')}/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
+        payload = self._build_payload(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+        )
         headers = {
             "Authorization": f"Bearer {self.settings.dashscope_api_key}",
             "Content-Type": "application/json",
@@ -111,8 +112,8 @@ class LLMClient:
                 with client.stream("POST", url, json=payload, headers=headers) as response:
                     response.raise_for_status()
                     for line in response.iter_lines():
-                        delta, usage, stream_events = self._consume_stream_line(line, usage, stream_events)
-                        if delta:
+                        deltas, usage, stream_events = self._consume_stream_line(line, usage, stream_events)
+                        for delta in deltas:
                             yield delta
         except httpx.HTTPStatusError as exc:
             raise LLMClientError(f"LLM request failed: HTTP {exc.response.status_code} {exc.response.text}") from exc
@@ -122,29 +123,59 @@ class LLMClient:
         self.last_usage = usage
         self.last_stream_events = stream_events
 
+    def _build_payload(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        stream: bool,
+    ) -> dict:
+        payload: dict = {
+            "model": self.settings.llm_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "enable_thinking": self.settings.enable_thinking,
+        }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
+        return payload
+
     def _consume_stream_line(
         self,
         line: str,
         usage: dict[str, int | None],
         stream_events: list[dict],
-    ) -> tuple[str | None, dict[str, int | None], list[dict]]:
+    ) -> tuple[list[StreamDelta], dict[str, int | None], list[dict]]:
         if not line or not line.startswith("data:"):
-            return None, usage, stream_events
+            return [], usage, stream_events
         raw = line.removeprefix("data:").strip()
         if raw == "[DONE]":
-            return None, usage, stream_events
+            return [], usage, stream_events
         try:
             data = json.loads(raw)
         except ValueError:
-            return None, usage, stream_events
+            return [], usage, stream_events
         if len(stream_events) < 40:
             stream_events.append(data)
         usage = _merge_usage(usage, _normalize_usage(data.get("usage")))
+
+        deltas: list[StreamDelta] = []
         try:
-            delta = data["choices"][0]["delta"].get("content")
+            delta = data["choices"][0]["delta"]
         except (KeyError, IndexError, TypeError, AttributeError):
-            delta = None
-        return delta, usage, stream_events
+            return deltas, usage, stream_events
+
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            deltas.append(StreamDelta(kind="reasoning", text=reasoning))
+
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            deltas.append(StreamDelta(kind="content", text=content))
+
+        return deltas, usage, stream_events
 
     def _generate_stream(
         self,
@@ -159,9 +190,10 @@ class LLMClient:
         with client.stream("POST", url, json=payload, headers=headers) as response:
             response.raise_for_status()
             for line in response.iter_lines():
-                delta, usage, stream_events = self._consume_stream_line(line, usage, stream_events)
-                if delta:
-                    content_parts.append(delta)
+                deltas, usage, stream_events = self._consume_stream_line(line, usage, stream_events)
+                for delta in deltas:
+                    if delta.kind == "content":
+                        content_parts.append(delta.text)
 
         content = "".join(content_parts).strip()
         if not content:

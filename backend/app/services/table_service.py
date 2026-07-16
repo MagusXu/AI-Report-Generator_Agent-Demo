@@ -14,6 +14,8 @@ from app.database import json_loads
 
 MAX_TABLES = 5
 TABLE_CANDIDATES_TOP_K = 5
+TABLE_SYNTHESIZE_TOP_K = 24
+TABLE_SYNTHESIZE_PER_DOCUMENT_LIMIT = 8
 TABLE_SYNTHESIZE_TEMPERATURE = 0.1
 TABLE_SYNTHESIZE_MAX_TOKENS = 1800
 UNVERIFIED_CELL_MARKER = "[[?"
@@ -141,7 +143,8 @@ TABLE_SYNTHESIZE_SYSTEM = """你是投行内部行业研究报告的表格生成
   ]
 }
 3. 每个单元格必须列出 refs（chunk_id 数组）；若资料不足，value 填「资料不足」且 refs 为空数组。
-4. 不要输出正文，不要输出引用标注 [ref:...]，引用只放在 refs 字段。"""
+4. 不要输出正文，不要输出引用标注 [ref:...]，引用只放在 refs 字段。
+5. 每行的 cells 数量必须等于列定义数量，且每个 cell 对象只能包含一个 column、一个 value、一个 refs；严禁在同一个 cell 对象里写多个 value 键或合并多列。"""
 
 
 class TableColumnSpec(BaseModel):
@@ -212,6 +215,75 @@ def build_table_query_suffix(tables: list[SynthesizeTableConfig | VerbatimTableC
         else:
             parts.append(f"表格{index}:{table.title} 检索:{table.description}")
     return " ".join(parts)
+
+
+def build_synthesize_table_query(table: SynthesizeTableConfig) -> str:
+    column_parts = [f"{column.name} {column.description}".strip() for column in table.columns]
+    notes = table.notes.strip()
+    parts = [table.title.strip(), *column_parts]
+    if notes:
+        parts.append(notes)
+    return " ".join(part for part in parts if part)
+
+
+_TABLE_SIGNAL_RE = re.compile(r"占比|份额|市场占有率|出货量|市占|品牌|表格|季度|年度|%|\d+\.\d+%")
+
+
+def _chunk_has_table_signal(chunk: dict[str, Any]) -> bool:
+    metadata = chunk.get("metadata") or {}
+    haystack = f"{chunk.get('text') or ''} {metadata.get('parent_text') or ''}"
+    return bool(_TABLE_SIGNAL_RE.search(haystack))
+
+
+def _apply_per_document_limit(chunks: list[dict[str, Any]], per_document_limit: int) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    selected: list[dict[str, Any]] = []
+    for chunk in chunks:
+        document_id = str((chunk.get("metadata") or {}).get("document_id") or "")
+        count = counts.get(document_id, 0)
+        if count >= per_document_limit:
+            continue
+        counts[document_id] = count + 1
+        selected.append(chunk)
+    return selected
+
+
+def _rank_table_retrieval_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(chunk: dict[str, Any]) -> tuple[int, int, float]:
+        metadata = chunk.get("metadata") or {}
+        is_table = 1 if str(metadata.get("block_type") or "") == "table" else 0
+        has_signal = 1 if _chunk_has_table_signal(chunk) else 0
+        distance = chunk.get("distance")
+        distance_value = float(distance) if isinstance(distance, (int, float)) else 1.0
+        return (-is_table, -has_signal, distance_value)
+
+    return sorted(chunks, key=sort_key)
+
+
+def retrieve_chunks_for_synthesize_table(
+    *,
+    table: SynthesizeTableConfig,
+    document_ids: list[str],
+    retrieval_top_k: int = TABLE_SYNTHESIZE_TOP_K,
+    per_document_limit: int = TABLE_SYNTHESIZE_PER_DOCUMENT_LIMIT,
+) -> tuple[str, list[dict[str, Any]]]:
+    query = build_synthesize_table_query(table)
+    top_k = max(retrieval_top_k, TABLE_SYNTHESIZE_TOP_K)
+
+    embedding_client = EmbeddingClient()
+    try:
+        query_embedding = embedding_client.embed_query(query)
+    except EmbeddingClientError as exc:
+        raise RuntimeError(f"Embedding 调用失败：{exc}") from exc
+
+    raw_results = VectorStore().query(
+        query_embedding=query_embedding,
+        document_ids=document_ids,
+        top_k=max(top_k * 3, 36),
+    )
+    ranked = _rank_table_retrieval_chunks(raw_results)
+    selected = _apply_per_document_limit(ranked, per_document_limit)[:top_k]
+    return query, selected
 
 
 def format_tables_for_narrative_prompt(tables: list[SynthesizeTableConfig | VerbatimTableConfig]) -> str:
@@ -403,6 +475,20 @@ def build_synthesize_table_messages(
     return [{"role": "system", "content": TABLE_SYNTHESIZE_SYSTEM}, {"role": "user", "content": user}]
 
 
+def _duplicate_value_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Preserve duplicate "value" keys the LLM occasionally emits when it merges
+    two columns into one cell object; json.loads would silently keep only the last."""
+    obj: dict[str, Any] = {}
+    values: list[Any] = []
+    for key, item in pairs:
+        if key == "value":
+            values.append(item)
+        obj[key] = item
+    if len(values) > 1:
+        obj["_values"] = values
+    return obj
+
+
 def extract_json_object(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):
@@ -412,7 +498,67 @@ def extract_json_object(raw: str) -> dict[str, Any]:
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError("LLM 未返回有效 JSON 表格")
-    return json.loads(text[start : end + 1])
+    return json.loads(text[start : end + 1], object_pairs_hook=_duplicate_value_pairs_hook)
+
+
+def _cell_values(cell: dict[str, Any]) -> list[Any]:
+    merged = cell.get("_values")
+    if isinstance(merged, list) and len(merged) > 1:
+        return merged
+    return [cell.get("value")]
+
+
+def _row_has_merged_cells(cells: list[Any]) -> bool:
+    return any(isinstance(cell, dict) and len(_cell_values(cell)) > 1 for cell in cells)
+
+
+def _map_cells_by_column(cells: list[Any], column_names: list[str]) -> dict[str, dict[str, Any]]:
+    if _row_has_merged_cells(cells):
+        return _reassign_row_positionally(cells, column_names)
+    values_by_column: dict[str, dict[str, Any]] = {}
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        column = str(cell.get("column") or "").strip()
+        if not column:
+            continue
+        values_by_column[column] = cell
+    return values_by_column
+
+
+def _reassign_row_positionally(cells: list[Any], column_names: list[str]) -> dict[str, dict[str, Any]]:
+    """A merged cell (duplicate "value" keys) means the LLM squeezed several
+    columns into one object, and the column labels on the remaining cells of
+    that row are usually shifted by the same amount. The emission order of
+    values is reliable, so rebuild the whole row positionally: each cell's
+    values go to its labeled column when that label hasn't been filled yet,
+    otherwise to the next unfilled column."""
+    values_by_column: dict[str, dict[str, Any]] = {}
+    cursor = 0
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        values = _cell_values(cell)
+        column = str(cell.get("column") or "").strip()
+        try:
+            labeled_index = column_names.index(column)
+        except ValueError:
+            labeled_index = -1
+        start_index = labeled_index if labeled_index >= cursor else cursor
+        if start_index >= len(column_names):
+            break
+        refs = cell.get("refs")
+        for offset, value in enumerate(values):
+            column_index = start_index + offset
+            if column_index >= len(column_names):
+                break
+            values_by_column[column_names[column_index]] = {
+                "column": column_names[column_index],
+                "value": value,
+                "refs": refs,
+            }
+            cursor = column_index + 1
+    return values_by_column
 
 
 def _normalize_lookup(value: str) -> str:
@@ -469,14 +615,7 @@ def render_table_json(
         cells = row.get("cells")
         if not isinstance(cells, list):
             continue
-        values_by_column: dict[str, dict[str, Any]] = {}
-        for cell in cells:
-            if not isinstance(cell, dict):
-                continue
-            column = str(cell.get("column") or "").strip()
-            if not column:
-                continue
-            values_by_column[column] = cell
+        values_by_column = _map_cells_by_column(cells, column_names)
 
         row_values: list[str] = []
         for column_name in column_names:
@@ -515,6 +654,8 @@ def process_tables_for_section(
     narrative_content: str,
     tables: list[SynthesizeTableConfig | VerbatimTableConfig],
     retrieved_chunks: list[dict[str, Any]],
+    document_ids: list[str] | None = None,
+    retrieval_top_k: int = TABLE_SYNTHESIZE_TOP_K,
     use_parent_context: bool = True,
 ) -> TableProcessingResult:
     if not tables:
@@ -545,11 +686,24 @@ def process_tables_for_section(
             )
             continue
 
+        table_query = ""
+        table_chunks = retrieved_chunks
+        if document_ids:
+            table_query, table_chunks = retrieve_chunks_for_synthesize_table(
+                table=table,
+                document_ids=document_ids,
+                retrieval_top_k=retrieval_top_k,
+            )
+            for chunk in table_chunks:
+                chunk_id = str(chunk.get("id") or "")
+                if chunk_id:
+                    chunks_by_id[chunk_id] = chunk
+
         messages = build_synthesize_table_messages(
             project=project,
             section=section,
             table=table,
-            chunks=retrieved_chunks,
+            chunks=table_chunks,
             use_parent_context=use_parent_context,
         )
         llm_client = LLMClient()
@@ -576,6 +730,8 @@ def process_tables_for_section(
                 "index": index,
                 "mode": "synthesize",
                 "title": table.title,
+                "table_query": table_query,
+                "retrieved_chunk_ids": [str(chunk.get("id")) for chunk in table_chunks if chunk.get("id")],
                 "warnings": warnings,
                 "llm_usage": llm_result.usage,
                 "llm_api_request": llm_result.request_payload,

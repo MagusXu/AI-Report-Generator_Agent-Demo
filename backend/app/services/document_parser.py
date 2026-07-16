@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import logging
 import re
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pdfplumber
 from docx import Document
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 _STEP_SPLIT_RE = re.compile(r"(?=第[一二三四五六七八九十\d]+步[：:])")
@@ -334,7 +339,7 @@ def _parse_pdf(path: Path) -> ParsedDocument:
         page_lines.append(_clean_lines(text))
 
     repeated = _repeated_margin_lines(page_lines)
-    blocks: list[ParsedBlock] = []
+    text_blocks: list[ParsedBlock] = []
     current_heading: list[str] = []
     for index, lines in enumerate(page_lines, start=1):
         clean_lines = [line for line in lines if line not in repeated]
@@ -346,11 +351,195 @@ def _parse_pdf(path: Path) -> ParsedDocument:
             page=index,
             heading_path=current_heading,
         )
-        blocks.extend(page_blocks)
+        text_blocks.extend(page_blocks)
+
+    table_blocks = _extract_pdf_tables_with_pdfplumber(path)
+    blocks = _merge_pdf_text_and_table_blocks(text_blocks, table_blocks)
 
     if not blocks:
         raise DocumentParserError("PDF contains no extractable text. OCR is not supported in this demo stage.")
     return ParsedDocument(blocks=blocks)
+
+
+def _extract_pdf_tables_with_pdfplumber(path: Path) -> list[ParsedBlock]:
+    table_blocks: list[ParsedBlock] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            last_caption = ""
+            for page_index, page in enumerate(pdf.pages, start=1):
+                try:
+                    found_tables = page.find_tables() or []
+                except Exception:
+                    logger.warning("pdfplumber failed to extract tables on page %s of %s", page_index, path.name)
+                    continue
+                page_table_index = 0
+                for found_table in found_tables:
+                    matrix = _pdf_table_matrix(page, found_table)
+                    markdown = _pdf_table_to_markdown(matrix)
+                    if not markdown:
+                        continue
+                    page_table_index += 1
+                    caption = _find_pdf_table_caption(page, found_table.bbox)
+                    if caption:
+                        last_caption = caption
+                    elif found_table.bbox[1] < _PDF_TABLE_CONTINUATION_TOP and last_caption:
+                        # A table starting at the very top of a page usually continues
+                        # the previous page's table, so it inherits that caption.
+                        caption = f"{last_caption}（续）"
+                    locator_parts = [f"第 {page_index} 页", f"表格 {page_table_index}"]
+                    if caption:
+                        locator_parts.append(caption)
+                    table_blocks.append(
+                        ParsedBlock(
+                            text=markdown,
+                            source_locator=" / ".join(locator_parts),
+                            block_type="table",
+                            page_start=page_index,
+                            page_end=page_index,
+                            heading_path=(caption,) if caption else (),
+                        )
+                    )
+    except Exception:
+        logger.warning("pdfplumber failed to open %s; continuing with text-only PDF parse", path.name, exc_info=True)
+    return table_blocks
+
+
+_PDF_TABLE_CAPTION_RE = re.compile(r"^(图表|图|表|Table|Exhibit)\s*\d+")
+_PDF_TABLE_CAPTION_SEARCH_HEIGHT = 46.0
+_PDF_TABLE_CONTINUATION_TOP = 100.0
+
+
+def _find_pdf_table_caption(page, bbox: tuple[float, float, float, float]) -> str:
+    top = bbox[1]
+    if top <= 4:
+        return ""
+    try:
+        crop = page.crop((0, max(0.0, top - _PDF_TABLE_CAPTION_SEARCH_HEIGHT), page.width, top))
+        text = crop.extract_text() or ""
+    except Exception:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    candidate = lines[-1]
+    if _PDF_TABLE_CAPTION_RE.match(candidate):
+        return re.sub(r"\s+", " ", candidate)
+    return ""
+
+
+_PDF_TABLE_ROW_TOLERANCE = 5.0
+
+
+def _pdf_table_matrix(page, found_table) -> list[list[str]] | None:
+    """Rebuild the table from word coordinates using the detected column boundaries.
+
+    pdfplumber's default lattice extraction can split logical rows when horizontal
+    rules cut through them; word-level reconstruction keyed on the (reliable)
+    vertical boundaries avoids losing rows.
+    """
+    try:
+        boundaries = sorted({edge for cell in found_table.cells if cell for edge in (cell[0], cell[2])})
+    except Exception:
+        boundaries = []
+    if len(boundaries) < 3:
+        try:
+            return found_table.extract()
+        except Exception:
+            return None
+
+    try:
+        crop = page.crop(found_table.bbox)
+        words = crop.extract_words()
+    except Exception:
+        words = []
+    if not words:
+        try:
+            return found_table.extract()
+        except Exception:
+            return None
+
+    row_groups: list[dict] = []
+    for word in sorted(words, key=lambda item: item["top"]):
+        if row_groups and word["top"] - row_groups[-1]["top"] <= _PDF_TABLE_ROW_TOLERANCE:
+            row_groups[-1]["words"].append(word)
+        else:
+            row_groups.append({"top": word["top"], "words": [word]})
+
+    column_count = len(boundaries) - 1
+    matrix: list[list[str]] = []
+    for group in row_groups:
+        cells = ["" for _ in range(column_count)]
+        for word in sorted(group["words"], key=lambda item: item["x0"]):
+            center = (word["x0"] + word["x1"]) / 2
+            column = bisect_right(boundaries, center) - 1
+            column = min(max(column, 0), column_count - 1)
+            cells[column] = f"{cells[column]} {word['text']}".strip()
+        matrix.append(cells)
+    return matrix
+
+
+def _pdf_table_to_markdown(raw_table: list[list] | None) -> str | None:
+    if not raw_table:
+        return None
+    rows: list[str] = []
+    for row in raw_table:
+        if row is None:
+            continue
+        cells = [_normalize_pdf_table_cell(cell) for cell in row]
+        cells = [cell for cell in cells if cell]
+        if len(cells) >= 2:
+            rows.append(" | ".join(cells))
+    if len(rows) < 2:
+        return None
+    return "\n".join(rows)
+
+
+def _normalize_pdf_table_cell(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\n", " ").strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _table_token_set(text: str) -> set[str]:
+    tokens = re.findall(r"[\u4e00-\u9fffA-Za-z0-9.%]+", text.lower())
+    return {token for token in tokens if len(token) >= 2}
+
+
+def _text_mostly_duplicates_table(text: str, table_tokens: set[str]) -> bool:
+    if not table_tokens:
+        return False
+    text_tokens = _table_token_set(text)
+    if len(text_tokens) < 6:
+        return False
+    overlap = text_tokens & table_tokens
+    coverage = len(overlap) / max(1, len(text_tokens))
+    table_coverage = len(overlap) / max(1, len(table_tokens))
+    return coverage >= 0.72 and table_coverage >= 0.45
+
+
+def _merge_pdf_text_and_table_blocks(
+    text_blocks: list[ParsedBlock],
+    table_blocks: list[ParsedBlock],
+) -> list[ParsedBlock]:
+    if not table_blocks:
+        return text_blocks
+
+    page_table_tokens: dict[int | None, set[str]] = {}
+    for block in table_blocks:
+        page_table_tokens.setdefault(block.page_start, set()).update(_table_token_set(block.text))
+
+    filtered_text: list[ParsedBlock] = []
+    for block in text_blocks:
+        if (
+            block.block_type == "text"
+            and block.page_start in page_table_tokens
+            and _text_mostly_duplicates_table(block.text, page_table_tokens[block.page_start])
+        ):
+            continue
+        filtered_text.append(block)
+
+    return filtered_text + table_blocks
 
 
 def _parse_docx(path: Path) -> ParsedDocument:

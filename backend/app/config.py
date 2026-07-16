@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         alias="LLM_BASE_URL",
     )
     llm_model: str = Field(default="qwen3.6-35b-a3b", alias="LLM_MODEL")
+    enable_thinking: bool = Field(default=False, alias="ENABLE_THINKING")
     embedding_base_url: str = Field(
         default="https://${WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         alias="EMBEDDING_BASE_URL",
