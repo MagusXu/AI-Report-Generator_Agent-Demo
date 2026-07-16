@@ -12,6 +12,7 @@
 
 - 报告基础信息：名称、行业、年份、语言
 - 参考资料：上传、类型、勾选、解析入库状态、预览、重新入库、删除
+- PDF 解析除正文外用 pdfplumber 抽取表格块（识别「图表 N」类表题、跨页续表继承表题，并去重与表格重复的正文）
 - 固定报告模板（行业风险结构）与章节切换
 - 章节 Prompt 编辑，以及 AI 辅助起草 Prompt
 - 章节 RAG 生成，支持 **SSE 流式输出**，前端展示简要「执行过程」阶段提示
@@ -68,7 +69,7 @@
 
 | 事件 | 含义 |
 |------|------|
-| `status` | 流水线阶段提示（`prepare` → `retrieve` → `generating` → 可选 `tables` / `tables_done` → `persist`） |
+| `status` | 流水线阶段提示（`prepare` → `retrieve` → `generating` → 可选 `truncated` / `tables` / `tables_done` → `persist`；`truncated` 表示正文达到 `max_tokens` 上限，可能被截断） |
 | `delta` | 正文增量 `{ "content": "..." }` |
 | `done` | 最终 `{ "workspace": ... }` |
 | `error` | `{ "detail": "..." }` |
@@ -77,8 +78,8 @@
 
 ## 表格
 
-- 正文生成时应输出占位符 `<<TABLE:1>>`、`<<TABLE:2>>`…，不要自行编造表格 Markdown。
-- **AI 汇总**：标题 + 列定义（+ 备注）→ 二次 LLM 生成 JSON 单元格；无法对齐资料的格子标记为 `[[?…?]]`。
+- 正文生成时应输出占位符 `<<TABLE:1>>`、`<<TABLE:2>>`…，不要自行编造表格 Markdown；正文缺失占位符时表格会兜底追加到章节末尾。选择表格时 `max_tokens` 会自动抬高到下限 1800，降低正文截断概率。
+- **AI 汇总**：标题 + 列定义（+ 备注）→ 按表格描述单独检索资料（优先表格类 chunk）→ 二次 LLM 生成 JSON 单元格；无法对齐资料的格子标记为 `[[?…?]]`。对模型偶发的畸形 JSON（同一 cell 合并多列、列标签错位）会按值的输出顺序整行重排修复。
 - **引用原表**：`description` 只用于检索；`title` 才是展示用表题，渲染在表格下方灰色小字。候选检索：`POST /api/sections/{id}/table-candidates`。
 - 落库表题使用内部标记 `[[表题：…]]`（仍兼容旧内容里表格前的 `## 标题`）。
 
@@ -95,7 +96,7 @@
 | GET | `/health`、`/api/runtime`、`/api/workspace`、`/api/report-preview`、`/api/report-template` |
 | PATCH | `/api/project` |
 | POST | `/api/project/new` |
-| POST | `/api/documents/upload-file` |
+| POST | `/api/documents/upload-file`、`/api/documents/upload`（流程占位，手动登记不解析） |
 | PATCH / DELETE / GET / POST | `/api/documents/{id}/selection`、`…/{id}`、`…/{id}/preview`、`…/{id}/reindex` |
 | PATCH | `/api/sections/{id}/prompt` |
 | POST | `/api/sections/{id}/generate`、`…/table-candidates`、`…/manual-edit`、`…/select-version`、`…/confirm`、`…/enhance-prompt`、`…/clear` |
@@ -141,6 +142,7 @@ DASHSCOPE_API_KEY=
 WORKSPACE_ID=
 LLM_BASE_URL=https://${WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 LLM_MODEL=qwen3.6-35b-a3b
+ENABLE_THINKING=false
 EMBEDDING_BASE_URL=https://${WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v4
 DATABASE_URL=sqlite:///./data/app.db
