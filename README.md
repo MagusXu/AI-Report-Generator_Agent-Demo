@@ -149,7 +149,7 @@ DATABASE_URL=sqlite:///./data/app.db
 CHROMA_PATH=./data/chroma
 UPLOAD_DIR=./uploads
 EXPORT_DIR=./exports
-CORS_ORIGINS=http://127.0.0.1:5173,http://127.0.0.1:5174
+CORS_ORIGINS=http://127.0.0.1:5173
 ```
 
 **切勿提交**真实 API Key、`config.env`、上传原文、Chroma/SQLite 数据、导出物、`node_modules` 或虚拟环境。

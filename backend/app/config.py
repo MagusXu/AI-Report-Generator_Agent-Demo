@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
     export_dir: str = Field(default="./exports", alias="EXPORT_DIR")
     cors_origins: str = Field(
-        default="http://127.0.0.1:5173,http://127.0.0.1:5174",
+        default="http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
     )
     chunk_child_target_chars: int = Field(default=820, alias="CHUNK_CHILD_TARGET_CHARS")
