@@ -256,20 +256,59 @@ const defaultGenerationSettings: GenerationSettings = {
   max_tokens: 2200,
 };
 
+function formatApiDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "msg" in item) return String((item as { msg: unknown }).msg);
+        return "";
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("；");
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      /* ignore */
+    }
+  }
+  return fallback;
+}
+
+function networkErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message || "";
+  if (
+    error.name === "TypeError" ||
+    /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
+  ) {
+    return "后端未连接或无法访问，请确认本地 API（8000）已启动";
+  }
+  return message || fallback;
+}
+
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const body = options?.body;
   const isFormData = body instanceof FormData;
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: isFormData ? options?.headers : { "Content-Type": "application/json", ...(options?.headers ?? {}) },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: isFormData ? options?.headers : { "Content-Type": "application/json", ...(options?.headers ?? {}) },
+    });
+  } catch (error) {
+    throw new Error(networkErrorMessage(error, "后端未连接或无法访问"));
+  }
 
   if (!response.ok) {
     const text = await response.text();
     let message = text;
     try {
       const data = JSON.parse(text);
-      message = data.detail ?? text;
+      message = formatApiDetail(data.detail, text);
     } catch {
       message = text;
     }
@@ -660,7 +699,7 @@ function App() {
       setStatus(data.candidates.length ? `表格候选已返回 ${data.candidates.length} 条` : "未找到匹配的表格候选");
     } catch (error) {
       updateTableDraft(tableId, { searching: false });
-      setStatus(error instanceof Error ? error.message : "检索表格候选失败");
+      setStatus(networkErrorMessage(error, "检索表格候选失败"));
     }
   }
 
@@ -754,18 +793,23 @@ function App() {
     setStatus("开始生成…");
 
     try {
-      const response = await fetch(`${API_BASE}/api/sections/${activeSection.id}/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      let response: Response;
+      try {
+        response = await fetch(`${API_BASE}/api/sections/${activeSection.id}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch (error) {
+        throw new Error(networkErrorMessage(error, "后端未连接或无法访问"));
+      }
 
       if (!response.ok) {
         const text = await response.text();
         let message = text;
         try {
           const data = JSON.parse(text);
-          message = data.detail ?? text;
+          message = formatApiDetail(data.detail, text);
         } catch {
           message = text;
         }
@@ -814,11 +858,9 @@ function App() {
         }
       });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "流式生成失败");
-      setGenerationSteps((prev) => [
-        ...prev,
-        { phase: "error", message: error instanceof Error ? error.message : "流式生成失败" },
-      ]);
+      const message = networkErrorMessage(error, "流式生成失败");
+      setStatus(message);
+      setGenerationSteps((prev) => [...prev, { phase: "error", message }]);
     } finally {
       setGenerating(false);
       setLiveContent("");
