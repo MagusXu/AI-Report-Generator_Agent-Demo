@@ -98,13 +98,13 @@ PROMPT_ASSIST_SYSTEM = """你是商业银行内部使用的「章节生成 Promp
 2. 不要输出报告正文，不要输出 [ref:chunk_id]，不要编造具体数值、年份或真实公司全称。
 3. 优先沿用并强化「当前默认 Prompt」中的写作目标；结合「用户补充要求」做修订，而不是推倒重来。
 4. 与整份报告大纲保持衔接：明确本章在「宏观/政策 → 行业景气与结构 → 商业模式与运营财务 → 信用风险与银行影响」链条中的位置，避免与前后章节重复堆砌同一风险点。
-5. 输出结构尽量固定为以下四段（可用【】标题）：
+5. 输出结构尽量固定为以下三段（可用【】标题）：
    【写作目标】本章要回答什么问题、覆盖哪些分析维度、如何落到银行授信关注点。
    【写作风格】正式审慎、结构清晰；可说明条块/分类对比/因果链条等展开方式。
    【数据引用要求】以定性、趋势、区间表述为主；禁止要求编造精确数据；案例仅用泛化称谓（如「某大型品牌商」）。
-   【篇幅建议】给出段落/条块数量与大致字数区间，与本章功能匹配。
-6. 篇幅控制在约 350–650 字，表述克制、可执行；不要写成空泛模板口号。
-7. 除非用户明确要求，不要在 Prompt 里规定插入表格或占位符；表格由系统在生成阶段另行配置。"""
+6. 不要在章节 Prompt 中写字数、篇幅区间或段落数量要求；正文篇幅由系统「生成参数」在生成阶段注入。
+7. 表述克制、可执行；不要写成空泛模板口号。
+8. 除非用户明确要求，不要在 Prompt 里规定插入表格或占位符；表格由系统在生成阶段另行配置。"""
 
 PROMPT_ASSIST_MAX_TOKENS = 1400
 PROMPT_ASSIST_TEMPERATURE = 0.3
@@ -166,7 +166,15 @@ class GenerateRequest(BaseModel):
     per_document_limit: int = Field(default=3, ge=1, le=10)
     use_parent_context: bool = True
     temperature: float = Field(default=0.2, ge=0, lt=2)
+    section_chars: int = Field(default=800, ge=300, le=2000)
     max_tokens: int = Field(default=2200, ge=300, le=6000)
+
+
+SECTION_LENGTH_RANGES: dict[str, tuple[int, int]] = {
+    "short": (300, 500),
+    "medium": (500, 800),
+    "long": (800, 1200),
+}
 
 
 class ManualEditRequest(BaseModel):
@@ -456,6 +464,21 @@ def build_rag_query(project: dict, section: dict, prompt: str, tables: list | No
     return f"{base} {suffix}".strip()
 
 
+def strip_section_length_hints(prompt: str) -> str:
+    """Remove hardcoded length guidance so generation settings control word count."""
+    cleaned = re.sub(r"【篇幅建议】[^\n]*", "", prompt)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def format_section_length_instruction(length: str, section_chars: int) -> str:
+    preset = SECTION_LENGTH_RANGES.get(length)
+    if preset and section_chars == preset[1]:
+        low, high = preset
+        return f"篇幅要求：本章正文总字数约 {low}–{high} 字，信息密度适中，避免明显偏短或注水扩写。"
+    return f"篇幅要求：本章正文总字数约 {section_chars} 字，信息密度适中，避免明显偏短或注水扩写。"
+
+
 def build_rag_messages(
     project: dict,
     section: dict,
@@ -464,6 +487,8 @@ def build_rag_messages(
     system_prompt: str,
     use_parent_context: bool = True,
     tables: list | None = None,
+    length: str = "medium",
+    section_chars: int = 800,
 ) -> list[dict[str, str]]:
     context_lines = []
     seen_parent_ids: set[str] = set()
@@ -483,6 +508,9 @@ def build_rag_messages(
             f"内容: {context_text}"
         )
 
+    section_prompt = strip_section_length_hints(prompt)
+    length_instruction = format_section_length_instruction(length, section_chars)
+
     user = f"""请为报告《{project['name']}》生成章节「{section['title']}」。
 
 报告基础信息：
@@ -491,8 +519,9 @@ def build_rag_messages(
 - 语言：{project['language']}
 
 章节 prompt：
-{prompt}
+{section_prompt}
 {_table_prompt_block(tables)}
+{length_instruction}
 
 可引用资料：
 {chr(10).join(context_lines)}
@@ -545,6 +574,7 @@ def generation_settings_snapshot(payload: GenerateRequest) -> dict:
         "per_document_limit": payload.per_document_limit,
         "use_parent_context": payload.use_parent_context,
         "temperature": payload.temperature,
+        "section_chars": payload.section_chars,
         "max_tokens": payload.max_tokens,
         "tables": [table.model_dump() for table in payload.tables],
     }
@@ -650,6 +680,8 @@ def assemble_section_context(base: dict, retrieval: dict, payload: GenerateReque
         system_prompt=system_prompt,
         use_parent_context=payload.use_parent_context,
         tables=payload.tables,
+        length=payload.length,
+        section_chars=payload.section_chars,
     )
     return {
         **base,
@@ -683,6 +715,7 @@ def finalize_generated_content(
         retrieved_chunks=retrieved_chunks,
         document_ids=[doc["id"] for doc in context["indexed_docs"]],
         retrieval_top_k=payload.retrieval_top_k,
+        per_document_limit=payload.per_document_limit,
         use_parent_context=payload.use_parent_context,
     )
     merged_reference_ids = list(reference_ids)

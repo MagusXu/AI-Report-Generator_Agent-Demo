@@ -614,23 +614,68 @@ label {
 
 .settings-panel {
   display: grid;
-  gap: 12px;
+  gap: 0;
   border: 1px solid #d9e0e7;
   border-radius: 8px;
   background: #ffffff;
   margin-top: 10px;
-  padding: 10px;
+  padding: 0;
+  overflow: hidden;
 }
 
 .settings-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  margin: 0;
+  padding: 11px 36px;
   color: #26303a;
   cursor: pointer;
   font-size: 13px;
-  font-weight: 850;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  list-style: none;
+  background: #f5f7fa;
+  user-select: none;
+}
+
+.settings-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-panel summary::marker {
+  content: "";
+}
+
+.settings-panel summary::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #5a6470;
+  border-bottom: 1.5px solid #5a6470;
+  transform: translateY(-65%) rotate(45deg);
+  transition: transform 0.15s ease;
 }
 
 .settings-panel[open] summary {
-  margin-bottom: 10px;
+  margin-bottom: 0;
+  border-bottom: 1px solid #e4ebf2;
+}
+
+.settings-panel[open] summary::after {
+  transform: translateY(-20%) rotate(225deg);
+}
+
+.settings-panel-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
 }
 
 .settings-group {
@@ -643,6 +688,11 @@ label {
   color: #5a6470;
   font-size: 12px;
   font-weight: 800;
+}
+
+.settings-hint {
+  color: #7a8490;
+  font-size: 11px;
 }
 
 .segmented-control {
@@ -712,6 +762,18 @@ label {
 
 .settings-grid input {
   padding: 7px 8px;
+}
+
+.settings-grid label.has-error input {
+  border-color: #b42318;
+}
+
+.settings-field-error {
+  display: block;
+  margin-top: 4px;
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .button-row,
@@ -1232,6 +1294,18 @@ label {
   margin-top: 10px;
 }
 
+.table-config-shell {
+  margin-top: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.table-config-toggle {
+  margin-top: 10px;
+}
+
 .table-draft-card {
   border: 1px solid #d9e0e7;
   border-radius: 10px;
@@ -1285,9 +1359,32 @@ label {
   background: #fff;
 }
 
+.table-candidate-item.confirmed {
+  border-color: #9db0c7;
+  background: #f7f9fc;
+}
+
 .table-candidate-item span {
   display: grid;
   gap: 4px;
+}
+
+.table-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.confirmed-table-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #243247;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .table-candidate-item em,

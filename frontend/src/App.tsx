@@ -138,8 +138,25 @@ type GenerationSettings = {
   per_document_limit: number;
   use_parent_context: boolean;
   temperature: number;
+  section_chars: number;
   max_tokens: number;
 };
+
+const SECTION_LENGTH_RANGES: Record<GenerationSettings["length"], { min: number; max: number }> = {
+  short: { min: 300, max: 500 },
+  medium: { min: 500, max: 800 },
+  long: { min: 800, max: 1200 },
+};
+
+const SECTION_CHARS_MIN = 300;
+const SECTION_CHARS_MAX = 2000;
+
+function sectionCharsError(value: number): string | null {
+  if (!Number.isFinite(value) || value < SECTION_CHARS_MIN || value > SECTION_CHARS_MAX) {
+    return `请输入 ${SECTION_CHARS_MIN}–${SECTION_CHARS_MAX} 之间的整数`;
+  }
+  return null;
+}
 
 type TableColumnDraft = {
   name: string;
@@ -253,6 +270,7 @@ const defaultGenerationSettings: GenerationSettings = {
   per_document_limit: 3,
   use_parent_context: true,
   temperature: 0.2,
+  section_chars: SECTION_LENGTH_RANGES.medium.max,
   max_tokens: 2200,
 };
 
@@ -659,6 +677,7 @@ function App() {
   const confirmedSections = workspace.sections.filter((section) => section.confirmed).length;
   const unconfirmedSections = workspace.sections.filter((section) => section.current_version && !section.confirmed);
   const indexedDocuments = workspace.documents.filter((document) => document.parse_status === "indexed");
+  const sectionCharsFieldError = sectionCharsError(generationSettings.section_chars);
   const latestExport = workspace.export_records[0];
   const latestLog = workspace.ai_call_logs[0];
 
@@ -762,6 +781,12 @@ function App() {
     const tableError = validateTableDrafts(includeTable, tableDrafts);
     if (tableError) {
       setStatus(tableError);
+      return;
+    }
+
+    const charsError = sectionCharsError(generationSettings.section_chars);
+    if (charsError) {
+      setStatus(`章节最大字数无效：${charsError}`);
       return;
     }
 
@@ -1108,8 +1133,8 @@ function App() {
   }
 
   function updateLength(length: GenerationSettings["length"]) {
-    const maxTokensMap = { short: 1000, medium: 2200, long: 3600 };
-    setGenerationSettings({ ...generationSettings, length, max_tokens: maxTokensMap[length] });
+    const range = SECTION_LENGTH_RANGES[length];
+    setGenerationSettings({ ...generationSettings, length, section_chars: range.max });
   }
 
   async function submitPromptAssist(event: FormEvent) {
@@ -1720,18 +1745,20 @@ function App() {
               />
               <details className="settings-panel">
                 <summary>System Prompt</summary>
-                <textarea
-                  className="system-prompt-editor"
-                  value={systemPromptDraft}
-                  onChange={(event) => setSystemPromptDraft(event.target.value)}
-                />
-                <div className="button-row">
-                  <button type="button" onClick={() => void restoreDefaultSystemPrompt()}>
-                    恢复默认
-                  </button>
-                  <button type="button" onClick={() => setStatus("System Prompt 已更新，将用于下一次生成")}>
-                    应用修改
-                  </button>
+                <div className="settings-panel-body">
+                  <textarea
+                    className="system-prompt-editor"
+                    value={systemPromptDraft}
+                    onChange={(event) => setSystemPromptDraft(event.target.value)}
+                  />
+                  <div className="button-row">
+                    <button type="button" onClick={() => void restoreDefaultSystemPrompt()}>
+                      恢复默认
+                    </button>
+                    <button type="button" onClick={() => setStatus("System Prompt 已更新，将用于下一次生成")}>
+                      应用修改
+                    </button>
+                  </div>
                 </div>
               </details>
               <div className="button-row">
@@ -1755,6 +1782,7 @@ function App() {
               </div>
               <details className="settings-panel">
                 <summary>生成参数</summary>
+                <div className="settings-panel-body">
                 <div className="settings-group">
                   <span>生成风格</span>
                   <div className="segmented-control">
@@ -1764,12 +1792,16 @@ function App() {
                   </div>
                 </div>
                 <div className="settings-group">
-                  <span>输出长度</span>
+                  <span>章节长度</span>
                   <div className="segmented-control">
                     <button type="button" className={generationSettings.length === "short" ? "active" : ""} onClick={() => updateLength("short")}>短</button>
                     <button type="button" className={generationSettings.length === "medium" ? "active" : ""} onClick={() => updateLength("medium")}>中</button>
                     <button type="button" className={generationSettings.length === "long" ? "active" : ""} onClick={() => updateLength("long")}>长</button>
                   </div>
+                  <small className="settings-hint">
+                    {SECTION_LENGTH_RANGES[generationSettings.length].min}–
+                    {SECTION_LENGTH_RANGES[generationSettings.length].max} 字
+                  </small>
                 </div>
                 <label className="switch-row">
                   <input
@@ -1814,6 +1846,26 @@ function App() {
                       }
                     />
                   </label>
+                  <label className={sectionCharsFieldError ? "has-error" : undefined}>
+                    章节最大字数
+                    <input
+                      type="number"
+                      min={SECTION_CHARS_MIN}
+                      max={SECTION_CHARS_MAX}
+                      step="50"
+                      value={generationSettings.section_chars}
+                      aria-invalid={Boolean(sectionCharsFieldError)}
+                      onChange={(event) =>
+                        setGenerationSettings({
+                          ...generationSettings,
+                          section_chars: Number(event.target.value),
+                        })
+                      }
+                    />
+                    {sectionCharsFieldError ? (
+                      <small className="settings-field-error">{sectionCharsFieldError}</small>
+                    ) : null}
+                  </label>
                   <label>
                     temperature
                     <input
@@ -1841,26 +1893,30 @@ function App() {
                     />
                   </label>
                 </div>
+                </div>
               </details>
-              <details className="settings-panel table-config-panel">
-                <summary>表格配置</summary>
-                <label className="switch-row">
-                  <input
-                    type="checkbox"
-                    checked={includeTable}
-                    onChange={(event) => {
-                      const checked = event.target.checked;
-                      setIncludeTable(checked);
-                      if (checked && !tableDrafts.length) {
-                        setTableDrafts([createTableDraft()]);
-                      }
-                    }}
-                  />
-                  需要添加表格
-                </label>
-                {includeTable ? (
+              <label className="switch-row table-config-toggle">
+                <input
+                  type="checkbox"
+                  checked={includeTable}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setIncludeTable(checked);
+                    if (checked && !tableDrafts.length) {
+                      setTableDrafts([createTableDraft()]);
+                    }
+                  }}
+                />
+                需要添加表格
+              </label>
+              {includeTable ? (
+                <div className="table-config-shell table-config-panel">
                   <div className="table-draft-list">
-                    {tableDrafts.map((table, index) => (
+                    {tableDrafts.map((table, index) => {
+                      const confirmedCandidate = table.candidates.find(
+                        (candidate) => candidate.chunk_id === table.confirmedChunkId,
+                      );
+                      return (
                       <article key={table.id} className="table-draft-card">
                         <div className="table-draft-header">
                           <strong>表格 {index + 1}</strong>
@@ -1986,14 +2042,50 @@ function App() {
                                 }
                               />
                             </label>
-                            <button
-                              type="button"
-                              disabled={busy || table.searching || !table.description.trim()}
-                              onClick={() => void searchTableCandidates(table.id)}
-                            >
-                              {table.searching ? "检索中…" : "检索候选"}
-                            </button>
-                            {table.candidates.length ? (
+                            {!table.confirmedChunkId ? (
+                              <button
+                                type="button"
+                                disabled={busy || table.searching || !table.description.trim()}
+                                onClick={() => void searchTableCandidates(table.id)}
+                              >
+                                {table.searching ? "检索中…" : table.candidates.length ? "重新检索" : "检索候选"}
+                              </button>
+                            ) : null}
+                            {table.confirmedChunkId ? (
+                              <div className="table-candidate-list">
+                                {confirmedCandidate ? (
+                                  <div className="table-candidate-item confirmed">
+                                    <span>
+                                      <span className="confirmed-table-badge">已确认原表</span>
+                                      <strong>{confirmedCandidate.document_name}</strong>
+                                      <small>
+                                        {blockTypeLabel(confirmedCandidate.block_type)} · {confirmedCandidate.source_locator}
+                                      </small>
+                                      {renderTableCandidatePreview(confirmedCandidate)}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <p className="panel-copy">已确认原表，可重新检索后再次选择。</p>
+                                )}
+                                <div className="table-candidate-actions">
+                                  {confirmedCandidate ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => updateTableDraft(table.id, { confirmedChunkId: "" })}
+                                    >
+                                      重新选择
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    disabled={busy || table.searching || !table.description.trim()}
+                                    onClick={() => void searchTableCandidates(table.id)}
+                                  >
+                                    {table.searching ? "检索中…" : "重新检索"}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : table.candidates.length ? (
                               <div className="table-candidate-list">
                                 {table.candidates.map((candidate) => (
                                   <label key={candidate.chunk_id} className="table-candidate-item">
@@ -2017,7 +2109,8 @@ function App() {
                           </>
                         )}
                       </article>
-                    ))}
+                      );
+                    })}
                     <button
                       type="button"
                       disabled={tableDrafts.length >= 5}
@@ -2027,8 +2120,8 @@ function App() {
                     </button>
                     {tableValidationError ? <p className="panel-copy table-validation">{tableValidationError}</p> : null}
                   </div>
-                ) : null}
-              </details>
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="primary-action"

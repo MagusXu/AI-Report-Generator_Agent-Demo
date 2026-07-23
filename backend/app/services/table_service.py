@@ -15,9 +15,12 @@ from app.database import json_loads
 MAX_TABLES = 5
 TABLE_CANDIDATES_TOP_K = 5
 TABLE_SYNTHESIZE_TOP_K = 24
+# Table synthesize needs more same-doc chunks than narrative (price-band prose often
+# sits behind several chart/table blocks). Keep a floor even if UI per_document_limit is low.
 TABLE_SYNTHESIZE_PER_DOCUMENT_LIMIT = 8
 TABLE_SYNTHESIZE_TEMPERATURE = 0.1
-TABLE_SYNTHESIZE_MAX_TOKENS = 1800
+# Multi-row brand/share tables often exceed 1800 completion tokens and truncate mid-JSON.
+TABLE_SYNTHESIZE_MAX_TOKENS = 4096
 UNVERIFIED_CELL_MARKER = "[[?"
 UNVERIFIED_CELL_END = "?]]"
 PLACEHOLDER_PATTERN = re.compile(r"<<TABLE:(\d+)>>")
@@ -142,9 +145,10 @@ TABLE_SYNTHESIZE_SYSTEM = """你是投行内部行业研究报告的表格生成
     }
   ]
 }
-3. 每个单元格必须列出 refs（chunk_id 数组）；若资料不足，value 填「资料不足」且 refs 为空数组。
+3. 每个单元格必须列出 refs（chunk_id 数组）；若资料不足，value 填「资料不足」且 refs 为空数组。每个单元格 refs 最多 2 个 chunk_id。
 4. 不要输出正文，不要输出引用标注 [ref:...]，引用只放在 refs 字段。
-5. 每行的 cells 数量必须等于列定义数量，且每个 cell 对象只能包含一个 column、一个 value、一个 refs；严禁在同一个 cell 对象里写多个 value 键或合并多列。"""
+5. 每行的 cells 数量必须等于列定义数量，且每个 cell 对象只能包含一个 column、一个 value、一个 refs；严禁在同一个 cell 对象里写多个 value 键或合并多列。
+6. 列定义中的区间/枚举标签若资料中有对应表述，优先按资料原文填写，并引用含该原文的 chunk；不要只从列描述抄标签却留空 refs。"""
 
 
 class TableColumnSpec(BaseModel):
@@ -227,12 +231,39 @@ def build_synthesize_table_query(table: SynthesizeTableConfig) -> str:
 
 
 _TABLE_SIGNAL_RE = re.compile(r"占比|份额|市场占有率|出货量|市占|品牌|表格|季度|年度|%|\d+\.\d+%")
+_QUERY_TERM_RE = re.compile(
+    r"[\u4e00-\u9fff]{2,}|\$?\d+(?:\.\d+)?(?:\s*[-–—~至到]\s*\$?\d+(?:\.\d+)?)?|美元|人民币|占比|份额|出货"
+)
 
 
 def _chunk_has_table_signal(chunk: dict[str, Any]) -> bool:
     metadata = chunk.get("metadata") or {}
     haystack = f"{chunk.get('text') or ''} {metadata.get('parent_text') or ''}"
     return bool(_TABLE_SIGNAL_RE.search(haystack))
+
+
+def _chunk_text_blob(chunk: dict[str, Any]) -> str:
+    metadata = chunk.get("metadata") or {}
+    return f"{chunk.get('text') or ''} {metadata.get('parent_text') or ''}"
+
+
+def _extract_query_terms(query: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for match in _QUERY_TERM_RE.findall(query):
+        term = match.strip()
+        if len(term) < 2 or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _query_overlap_score(chunk: dict[str, Any], query_terms: list[str]) -> int:
+    if not query_terms:
+        return 0
+    haystack = _chunk_text_blob(chunk)
+    return sum(1 for term in query_terms if term in haystack)
 
 
 def _apply_per_document_limit(chunks: list[dict[str, Any]], per_document_limit: int) -> list[dict[str, Any]]:
@@ -248,14 +279,51 @@ def _apply_per_document_limit(chunks: list[dict[str, Any]], per_document_limit: 
     return selected
 
 
-def _rank_table_retrieval_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def sort_key(chunk: dict[str, Any]) -> tuple[int, int, float]:
+def _interleave_by_document(chunks: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    """Prefer document diversity: round-robin across docs while preserving intra-doc rank order."""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for chunk in chunks:
+        document_id = str((chunk.get("metadata") or {}).get("document_id") or "")
+        if document_id not in buckets:
+            buckets[document_id] = []
+            order.append(document_id)
+        buckets[document_id].append(chunk)
+
+    selected: list[dict[str, Any]] = []
+    index = 0
+    while len(selected) < top_k:
+        progressed = False
+        for document_id in order:
+            bucket = buckets[document_id]
+            if index < len(bucket):
+                selected.append(bucket[index])
+                progressed = True
+                if len(selected) >= top_k:
+                    break
+        if not progressed:
+            break
+        index += 1
+    return selected
+
+
+def _rank_table_retrieval_chunks(
+    chunks: list[dict[str, Any]],
+    *,
+    query: str = "",
+) -> list[dict[str, Any]]:
+    query_terms = _extract_query_terms(query)
+
+    def sort_key(chunk: dict[str, Any]) -> tuple[int, int, int, float]:
         metadata = chunk.get("metadata") or {}
         is_table = 1 if str(metadata.get("block_type") or "") == "table" else 0
         has_signal = 1 if _chunk_has_table_signal(chunk) else 0
+        overlap = _query_overlap_score(chunk, query_terms)
         distance = chunk.get("distance")
         distance_value = float(distance) if isinstance(distance, (int, float)) else 1.0
-        return (-is_table, -has_signal, distance_value)
+        # Query overlap first: chart/table blocks with generic「占比」must not bury
+        # prose that actually matches column labels (e.g. 美元 / 价格区间).
+        return (-overlap, -is_table, -has_signal, distance_value)
 
     return sorted(chunks, key=sort_key)
 
@@ -269,6 +337,8 @@ def retrieve_chunks_for_synthesize_table(
 ) -> tuple[str, list[dict[str, Any]]]:
     query = build_synthesize_table_query(table)
     top_k = max(retrieval_top_k, TABLE_SYNTHESIZE_TOP_K)
+    # Narrative UI default (3) is too tight for synthesize tables on a single industry PDF.
+    doc_limit = max(1, per_document_limit, TABLE_SYNTHESIZE_PER_DOCUMENT_LIMIT)
 
     embedding_client = EmbeddingClient()
     try:
@@ -281,8 +351,9 @@ def retrieve_chunks_for_synthesize_table(
         document_ids=document_ids,
         top_k=max(top_k * 3, 36),
     )
-    ranked = _rank_table_retrieval_chunks(raw_results)
-    selected = _apply_per_document_limit(ranked, per_document_limit)[:top_k]
+    ranked = _rank_table_retrieval_chunks(raw_results, query=query)
+    limited = _apply_per_document_limit(ranked, doc_limit)
+    selected = _interleave_by_document(limited, top_k)
     return query, selected
 
 
@@ -489,16 +560,224 @@ def _duplicate_value_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
-def extract_json_object(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+def _strip_code_fence(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _slice_json_object(text: str) -> str | None:
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    # Truncated object: keep from first brace for repair/partial recovery.
+    return text[start:]
+
+
+def _repair_json_text(text: str) -> str:
+    repaired = text.strip()
+    # Drop trailing commas before object/array closers.
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    # Insert missing commas between adjacent structures the model often omits.
+    repaired = re.sub(r"([}\]])(\s*)([{\[])", r"\1,\2\3", repaired)
+    repaired = re.sub(r'("(?:\\.|[^"\\])*")(\s*)(?=")', r"\1,\2", repaired)
+    repaired = re.sub(r"([0-9]|true|false|null)(\s+)(?=[{\[\"])", r"\1,\2", repaired, flags=re.I)
+    return repaired
+
+
+def _close_truncated_json(text: str) -> str:
+    """Best-effort close for truncated JSON objects/arrays."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    last_safe = 0
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+                last_safe = index + 1
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char in "{[":
+            stack.append("}" if char == "{" else "]")
+            last_safe = index + 1
+        elif char in "}]":
+            if stack and stack[-1] == char:
+                stack.pop()
+                last_safe = index + 1
+            else:
+                break
+        elif char in ",:":
+            last_safe = index + 1
+        elif not char.isspace():
+            last_safe = index + 1
+    trimmed = text[:last_safe].rstrip()
+    trimmed = re.sub(r",\s*$", "", trimmed)
+    while stack:
+        trimmed += stack.pop()
+    return trimmed
+
+
+def _loads_table_json(text: str) -> dict[str, Any]:
+    return json.loads(text, object_pairs_hook=_duplicate_value_pairs_hook)
+
+
+def _recover_partial_rows(text: str) -> dict[str, Any] | None:
+    """Salvage complete row objects before the first JSON syntax error in rows[]."""
+    match = re.search(r'"rows"\s*:\s*\[', text)
+    if not match:
+        return None
+    decoder = json.JSONDecoder(object_pairs_hook=_duplicate_value_pairs_hook)
+    index = match.end()
+    rows: list[Any] = []
+    length = len(text)
+    while index < length:
+        while index < length and text[index] in " \t\r\n,":
+            index += 1
+        if index >= length or text[index] == "]":
+            break
+        try:
+            item, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            break
+        rows.append(item)
+        index = end
+    if not rows:
+        return None
+    return {"rows": rows}
+
+
+def extract_json_object(raw: str) -> dict[str, Any]:
+    text = _strip_code_fence(raw)
+    sliced = _slice_json_object(text)
+    if not sliced:
         raise ValueError("LLM 未返回有效 JSON 表格")
-    return json.loads(text[start : end + 1], object_pairs_hook=_duplicate_value_pairs_hook)
+
+    candidates = [sliced, _repair_json_text(sliced), _close_truncated_json(_repair_json_text(sliced))]
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            payload = _loads_table_json(candidate)
+            if isinstance(payload, dict):
+                return payload
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            errors.append(str(exc))
+
+    # Prefer the candidate that salvages the most complete rows.
+    best_partial: dict[str, Any] | None = None
+    best_count = 0
+    for candidate in candidates:
+        partial = _recover_partial_rows(candidate)
+        if partial is None:
+            continue
+        count = len(partial.get("rows") or [])
+        if count > best_count:
+            best_partial = partial
+            best_count = count
+    if best_partial is not None:
+        return best_partial
+
+    detail = errors[-1] if errors else "unknown"
+    raise ValueError(f"LLM 未返回有效 JSON 表格（{detail}）")
+
+
+def _fallback_rows_for_table(table: SynthesizeTableConfig) -> list[dict[str, Any]]:
+    """Build a minimal 资料不足 table, preferring explicit bands in the first column description."""
+    columns = table.columns
+    if not columns:
+        return []
+    first = columns[0]
+    bands = [part.strip() for part in re.split(r"[，,;；/|]", first.description or "") if part.strip()]
+    if len(bands) >= 2:
+        row_labels = bands
+    else:
+        row_labels = ["资料不足"]
+
+    rows: list[dict[str, Any]] = []
+    for label in row_labels:
+        cells = []
+        for index, column in enumerate(columns):
+            value = label if index == 0 and label != "资料不足" else "资料不足"
+            cells.append({"column": column.name, "value": value, "refs": []})
+        rows.append({"cells": cells})
+    return rows
+
+
+def _render_fallback_table(table: SynthesizeTableConfig) -> tuple[str, list[str], list[str]]:
+    """Render fallback rows without source-alignment checks (labels are structural)."""
+    column_names = [column.name for column in table.columns]
+    rows = _fallback_rows_for_table(table)
+    rendered_rows: list[str] = [
+        "| " + " | ".join(column_names) + " |",
+        "| " + " | ".join("---" for _ in column_names) + " |",
+    ]
+    for row in rows:
+        values_by_column = {
+            str(cell.get("column") or ""): str(cell.get("value") or "资料不足")
+            for cell in (row.get("cells") or [])
+            if isinstance(cell, dict)
+        }
+        rendered_rows.append(
+            "| " + " | ".join(values_by_column.get(name, "资料不足") for name in column_names) + " |"
+        )
+    body = format_table_with_caption("\n".join(rendered_rows), table.title)
+    return body, [], []
+
+
+def build_synthesized_table_body(
+    *,
+    table: SynthesizeTableConfig,
+    llm_result: LLMResult,
+    chunks_by_id: dict[str, dict[str, Any]],
+) -> tuple[str, list[str], list[str]]:
+    warnings: list[str] = []
+    try:
+        payload = extract_json_object(llm_result.content)
+    except ValueError as exc:
+        body, refs, _ = _render_fallback_table(table)
+        return body, refs, [f"表格 JSON 解析失败，已降级为资料不足表：{exc}"]
+
+    try:
+        rendered, extra_reference_ids, render_warnings = render_table_json(
+            payload, table.columns, chunks_by_id
+        )
+    except ValueError as exc:
+        body, refs, _ = _render_fallback_table(table)
+        return body, refs, [f"表格结构无效，已降级为资料不足表：{exc}"]
+
+    warnings.extend(render_warnings)
+    body = format_table_with_caption(rendered, table.title)
+    return body, extra_reference_ids, warnings
 
 
 def _cell_values(cell: dict[str, Any]) -> list[Any]:
@@ -634,18 +913,6 @@ def render_table_json(
     return "\n".join(rendered_rows), extra_reference_ids, warnings
 
 
-def build_synthesized_table_body(
-    *,
-    table: SynthesizeTableConfig,
-    llm_result: LLMResult,
-    chunks_by_id: dict[str, dict[str, Any]],
-) -> tuple[str, list[str], list[str]]:
-    payload = extract_json_object(llm_result.content)
-    rendered, extra_reference_ids, warnings = render_table_json(payload, table.columns, chunks_by_id)
-    body = format_table_with_caption(rendered, table.title)
-    return body, extra_reference_ids, warnings
-
-
 def process_tables_for_section(
     conn,
     *,
@@ -656,6 +923,7 @@ def process_tables_for_section(
     retrieved_chunks: list[dict[str, Any]],
     document_ids: list[str] | None = None,
     retrieval_top_k: int = TABLE_SYNTHESIZE_TOP_K,
+    per_document_limit: int = TABLE_SYNTHESIZE_PER_DOCUMENT_LIMIT,
     use_parent_context: bool = True,
 ) -> TableProcessingResult:
     if not tables:
@@ -693,6 +961,7 @@ def process_tables_for_section(
                 table=table,
                 document_ids=document_ids,
                 retrieval_top_k=retrieval_top_k,
+                per_document_limit=per_document_limit,
             )
             for chunk in table_chunks:
                 chunk_id = str(chunk.get("id") or "")
